@@ -1,0 +1,84 @@
+# Traefik Dynamic Configuration
+
+http:
+  # Middlewares
+  middlewares:
+    # Security Headers
+    security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+        customResponseHeaders:
+          X-Robots-Tag: "none,noarchive,nosnippet,notranslate,noimageindex"
+          Server: ""
+
+    # Rate Limiting
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: 1m
+
+    # CORS for API
+    cors-api:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - PATCH
+          - OPTIONS
+        accessControlAllowHeaders:
+          - "*"
+        accessControlAllowOriginList:
+          - "https://vaporform.dev"
+          - "https://*.vaporform.dev"
+        accessControlMaxAge: 3600
+        addVaryHeader: true
+
+    # Compression
+    compression:
+      compress: true
+
+  # Routers for Dynamic Deployments
+  routers:
+    # Catch-all for deployment subdomains
+    deployments:
+      rule: "HostRegexp(`{subdomain:[a-z0-9-]+}.vaporform.dev`) && !Host(`api.vaporform.dev`, `ws.vaporform.dev`, `traefik.vaporform.dev`, `www.vaporform.dev`, `vaporform.dev`)"
+      service: deployments-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+        - compression
+
+  # Services for Dynamic Deployments
+  services:
+    deployments-service:
+      loadBalancer:
+        passHostHeader: true
+        servers: []
+        # Dynamic servers will be added by Docker labels
+
+# TCP Routers (for WebSocket upgrades)
+tcp:
+  routers:
+    terminal-ws:
+      rule: "HostSNI(`ws.vaporform.dev`)"
+      service: terminal-ws-service
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    terminal-ws-service:
+      loadBalancer:
+        servers:
+          - address: "terminal-ws:4001"

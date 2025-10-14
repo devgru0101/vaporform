@@ -1,0 +1,12 @@
+-- Add commit hash tracking to chat messages for restore points
+ALTER TABLE chat_messages
+  ADD COLUMN pre_edit_commit_hash TEXT,
+  ADD COLUMN post_edit_commit_hash TEXT;
+
+-- Create index for faster commit hash lookups
+CREATE INDEX idx_chat_messages_commits ON chat_messages(project_id, post_edit_commit_hash)
+  WHERE post_edit_commit_hash IS NOT NULL;
+
+-- Comments
+COMMENT ON COLUMN chat_messages.pre_edit_commit_hash IS 'Git commit hash before AI made changes (restore point)';
+COMMENT ON COLUMN chat_messages.post_edit_commit_hash IS 'Git commit hash after AI made changes';

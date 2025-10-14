@@ -1,6 +1,59 @@
+# Encore
 .encore
 encore.gen.go
 encore.gen.cue
 /.encore
-node_modules
 /encore.gen
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# SSL/TLS
+traefik/acme.json
+*.pem
+*.key
+*.crt
+
+# Backups
+*.sql.gz
+*.archive.gz
+*.tar.gz
+backup-*
+
+# Docker
+.dockerignore
+docker-compose.override.yml
