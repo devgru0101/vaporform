@@ -314,3 +314,260 @@ export const getDiff = api(
     }
   }
 );
+
+/**
+ * GitHub Integration Endpoints
+ */
+
+interface GitHubConnectionRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+}
+
+interface GitHubConnectionResponse {
+  connected: boolean;
+  pat?: string;
+  repoFullName?: string;
+  defaultBranch?: string;
+}
+
+interface ConnectGitHubRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+  pat: string;
+}
+
+interface ListGitHubReposRequest {
+  authorization: Header<'Authorization'>;
+  pat: string;
+}
+
+interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string;
+}
+
+interface ListGitHubReposResponse {
+  repos: GitHubRepo[];
+}
+
+interface CreateGitHubRepoRequest {
+  authorization: Header<'Authorization'>;
+  pat: string;
+  name: string;
+  private: boolean;
+}
+
+interface CreateGitHubRepoResponse {
+  repo: GitHubRepo;
+}
+
+interface PushToGitHubRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+  pat: string;
+  repoFullName: string;
+  branch: string;
+}
+
+/**
+ * Get GitHub connection status for a project
+ */
+export const getGitHubConnection = api(
+  { method: 'GET', path: '/git/github/connection/:projectId' },
+  async (req: GitHubConnectionRequest): Promise<GitHubConnectionResponse> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'view');
+
+    const { db } = await import('../shared/db.js');
+
+    const result = await db.query<{
+      github_pat: string | null;
+      github_repo_full_name: string | null;
+      github_default_branch: string | null;
+    }>`
+      SELECT github_pat, github_repo_full_name, github_default_branch
+      FROM projects
+      WHERE id = ${projectId}
+    `;
+
+    const row = await result.next();
+
+    if (!row || !row.github_pat) {
+      return { connected: false };
+    }
+
+    return {
+      connected: true,
+      pat: row.github_pat,
+      repoFullName: row.github_repo_full_name || undefined,
+      defaultBranch: row.github_default_branch || 'main',
+    };
+  }
+);
+
+/**
+ * Connect a project to GitHub
+ */
+export const connectGitHub = api(
+  { method: 'POST', path: '/git/github/connect' },
+  async (req: ConnectGitHubRequest): Promise<{ success: boolean }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'edit');
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    // Validate PAT by making a test API call
+    const testResponse = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `Bearer ${req.pat}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (!testResponse.ok) {
+      throw toAPIError(new ValidationError('Invalid GitHub Personal Access Token'));
+    }
+
+    const { db } = await import('../shared/db.js');
+
+    await db.query`
+      UPDATE projects
+      SET github_pat = ${req.pat}
+      WHERE id = ${projectId}
+    `;
+
+    return { success: true };
+  }
+);
+
+/**
+ * List GitHub repositories for the authenticated user
+ */
+export const listGitHubRepos = api(
+  { method: 'POST', path: '/git/github/repos' },
+  async (req: ListGitHubReposRequest): Promise<ListGitHubReposResponse> => {
+    await verifyClerkJWT(req.authorization);
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    const response = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+      headers: {
+        Authorization: `Bearer ${req.pat}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (!response.ok) {
+      throw toAPIError(new ValidationError('Failed to fetch GitHub repositories'));
+    }
+
+    const repos = (await response.json()) as GitHubRepo[];
+
+    return { repos };
+  }
+);
+
+/**
+ * Create a new GitHub repository
+ */
+export const createGitHubRepo = api(
+  { method: 'POST', path: '/git/github/create-repo' },
+  async (req: CreateGitHubRepoRequest): Promise<CreateGitHubRepoResponse> => {
+    await verifyClerkJWT(req.authorization);
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    if (!req.name || req.name.trim().length === 0) {
+      throw toAPIError(new ValidationError('Repository name is required'));
+    }
+
+    const response = await fetch('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${req.pat}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: req.name,
+        private: req.private,
+        auto_init: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw toAPIError(
+        new ValidationError(error.message || 'Failed to create GitHub repository')
+      );
+    }
+
+    const repo = (await response.json()) as GitHubRepo;
+
+    return { repo };
+  }
+);
+
+/**
+ * Push local commits to GitHub
+ */
+export const pushToGitHub = api(
+  { method: 'POST', path: '/git/github/push' },
+  async (req: PushToGitHubRequest): Promise<{ success: boolean }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'edit');
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    if (!req.repoFullName || req.repoFullName.trim().length === 0) {
+      throw toAPIError(new ValidationError('Repository full name is required'));
+    }
+
+    const git = createGitManager(projectId);
+
+    try {
+      // Add GitHub remote if it doesn't exist
+      const remoteUrl = `https://${req.pat}@github.com/${req.repoFullName}.git`;
+      await git.addRemote('origin', remoteUrl);
+
+      // Push to GitHub
+      await git.push('origin', req.branch || 'main');
+
+      // Update project with GitHub repo info
+      const { db } = await import('../shared/db.js');
+      await db.query`
+        UPDATE projects
+        SET
+          github_repo_full_name = ${req.repoFullName},
+          github_default_branch = ${req.branch || 'main'}
+        WHERE id = ${projectId}
+      `;
+
+      return { success: true };
+    } finally {
+      git.cleanup();
+    }
+  }
+);

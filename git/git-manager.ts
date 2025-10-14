@@ -401,6 +401,44 @@ export class GitManager {
   }
 
   /**
+   * Add a remote repository
+   */
+  async addRemote(name: string, url: string): Promise<void> {
+    try {
+      // Check if remote already exists
+      const remotes = await this.git.getRemotes();
+      const existingRemote = remotes.find((r) => r.name === name);
+
+      if (existingRemote) {
+        // Update existing remote URL
+        await this.git.remote(['set-url', name, url]);
+        console.log(`✓ Updated remote '${name}' to ${url}`);
+      } else {
+        // Add new remote
+        await this.git.addRemote(name, url);
+        console.log(`✓ Added remote '${name}': ${url}`);
+      }
+    } catch (error) {
+      console.error(`Failed to add/update remote '${name}':`, error);
+      throw new ValidationError(`Failed to add/update remote: ${error}`);
+    }
+  }
+
+  /**
+   * Push to remote repository
+   */
+  async push(remote: string, branch: string): Promise<void> {
+    try {
+      console.log(`Pushing ${branch} to ${remote}...`);
+      await this.git.push(remote, branch);
+      console.log(`✓ Successfully pushed ${branch} to ${remote}`);
+    } catch (error) {
+      console.error(`Failed to push to ${remote}:`, error);
+      throw new ValidationError(`Failed to push: ${error}`);
+    }
+  }
+
+  /**
    * Clean up working directory
    */
   cleanup(): void {

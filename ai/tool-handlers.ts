@@ -269,17 +269,112 @@ async function handleAttemptCompletion(
   const { result, command } = input;
 
   console.log(`[Completion] Project generation completed: ${result}`);
+  console.log(`[Completion] ========== STARTING AUTOMATIC DEPLOYMENT PIPELINE ==========`);
 
   let previewUrl: string | null = null;
   let deploymentStatus = 'completed';
 
+  try {
+    // STEP 1: Deploy files from VFS to Daytona sandbox
+    console.log(`[Completion] STEP 1: Deploying files from VFS to Daytona sandbox...`);
+    await updateJobProgress(jobId, 'Deploying files to workspace...');
+
+    const deployResult = await daytonaManager.deployProjectFromVFS(workspaceId, projectId);
+    console.log(`[Completion] ✓ Deployed ${deployResult.filesDeployed} files from VFS to Daytona`);
+    await logToolExecution(
+      jobId,
+      'attempt_completion',
+      'info',
+      `Deployed ${deployResult.filesDeployed} files from VFS to sandbox`
+    );
+
+    // STEP 2: Detect technology stack
+    console.log(`[Completion] STEP 2: Detecting technology stack...`);
+    await updateJobProgress(jobId, 'Detecting tech stack...');
+
+    const techStack = await daytonaManager.detectTechStack(workspaceId);
+    console.log(`[Completion] ✓ Detected: ${techStack.language} / ${techStack.framework} / ${techStack.packageManager}`);
+    await logToolExecution(
+      jobId,
+      'attempt_completion',
+      'info',
+      `Detected tech stack: ${techStack.language} with ${techStack.framework}`
+    );
+
+    // STEP 3: Install dependencies
+    console.log(`[Completion] STEP 3: Installing dependencies with ${techStack.packageManager}...`);
+    await updateJobProgress(jobId, 'Installing dependencies...');
+
+    try {
+      const installResult = await daytonaManager.installDependencies(workspaceId, techStack);
+      if (installResult.success) {
+        console.log(`[Completion] ✓ Dependencies installed successfully`);
+        await logToolExecution(jobId, 'attempt_completion', 'info', 'Dependencies installed successfully');
+      } else {
+        console.log(`[Completion] ⚠ Dependency installation failed: ${installResult.error}`);
+        await logToolExecution(
+          jobId,
+          'attempt_completion',
+          'warning',
+          `Dependency installation failed: ${installResult.error}`
+        );
+      }
+    } catch (installError) {
+      console.error(`[Completion] Error installing dependencies:`, installError);
+      await logToolExecution(
+        jobId,
+        'attempt_completion',
+        'warning',
+        `Dependency installation error: ${installError instanceof Error ? installError.message : 'Unknown error'}`
+      );
+    }
+
+    // STEP 4: Build project (if needed)
+    console.log(`[Completion] STEP 4: Building project...`);
+    await updateJobProgress(jobId, 'Building project...');
+
+    try {
+      const buildResult = await daytonaManager.buildProjectWithTechStack(workspaceId, techStack);
+      if (buildResult.success) {
+        console.log(`[Completion] ✓ Build completed successfully`);
+        await logToolExecution(jobId, 'attempt_completion', 'info', 'Project built successfully');
+      } else {
+        console.log(`[Completion] ⚠ Build failed or not required: ${buildResult.message}`);
+        await logToolExecution(
+          jobId,
+          'attempt_completion',
+          'info',
+          `Build: ${buildResult.message}`
+        );
+      }
+    } catch (buildError) {
+      console.error(`[Completion] Error building project:`, buildError);
+      await logToolExecution(
+        jobId,
+        'attempt_completion',
+        'warning',
+        `Build error: ${buildError instanceof Error ? buildError.message : 'Unknown error'}`
+      );
+    }
+  } catch (deployError) {
+    console.error(`[Completion] Deployment pipeline error:`, deployError);
+    await logToolExecution(
+      jobId,
+      'attempt_completion',
+      'error',
+      `Deployment error: ${deployError instanceof Error ? deployError.message : 'Unknown error'}`
+    );
+    deploymentStatus = 'failed';
+  }
+
+  // STEP 5: Start dev server and get preview URL
   // Determine the command to use (provided by AI or inferred)
   let devCommand = command;
 
   try {
     // If no command provided, try to infer from package.json
     if (!devCommand) {
-      console.log(`[Completion] No command provided, attempting to infer from package.json`);
+      console.log(`[Completion] STEP 5: No command provided, attempting to infer from package.json`);
       await updateJobProgress(jobId, 'Inferring dev server command...');
 
       const inferredCommand = await daytonaManager.inferDevCommand(workspaceId);
@@ -301,6 +396,7 @@ async function handleAttemptCompletion(
 
     // If we have a command (either provided or inferred), start the dev server
     if (devCommand) {
+      console.log(`[Completion] STEP 6: Starting dev server with command: ${devCommand}`);
       console.log(`[Completion] Starting dev server with command: ${devCommand}`);
       await updateJobProgress(jobId, 'Starting development server...');
 
@@ -392,6 +488,85 @@ async function handleAttemptCompletion(
     );
   }
 
+  // Auto-commit to Git
+  let commitHash: string | null = null;
+  try {
+    console.log(`[Completion] Creating Git commit for generated code...`);
+    await updateJobProgress(jobId, 'Creating Git commit...');
+
+    const { createGitManager } = await import('../git/git-manager.js');
+    const git = createGitManager(projectId);
+
+    try {
+      // Initialize Git if not already done
+      await git.init(projectId);
+
+      // Sync files from VFS to Git working directory
+      await git.syncFromVFS(projectId);
+
+      // Create commit
+      const commit = await git.commit(
+        projectId,
+        `Generated project: ${result}`,
+        'Vaporform Agent',
+        'agent@vaporform.dev'
+      );
+
+      commitHash = commit.commit_hash;
+      console.log(`[Completion] ✓ Created Git commit: ${commitHash.substring(0, 7)}`);
+      await logToolExecution(jobId, 'attempt_completion', 'info', `Created Git commit: ${commitHash.substring(0, 7)}`);
+
+      // Check if GitHub is connected
+      const project = await db.queryRow<{
+        github_pat: string | null;
+        github_repo_full_name: string | null;
+        github_default_branch: string | null;
+      }>`
+        SELECT github_pat, github_repo_full_name, github_default_branch
+        FROM projects
+        WHERE id = ${projectId}
+      `;
+
+      // Auto-push to GitHub if connected
+      if (project && project.github_pat && project.github_repo_full_name) {
+        console.log(`[Completion] Pushing to GitHub: ${project.github_repo_full_name}...`);
+        await updateJobProgress(jobId, 'Pushing to GitHub...');
+
+        try {
+          const remoteUrl = `https://${project.github_pat}@github.com/${project.github_repo_full_name}.git`;
+          await git.addRemote('origin', remoteUrl);
+          await git.push('origin', project.github_default_branch || 'main');
+
+          console.log(`[Completion] ✓ Pushed to GitHub successfully`);
+          await logToolExecution(
+            jobId,
+            'attempt_completion',
+            'info',
+            `Pushed to GitHub: ${project.github_repo_full_name}`
+          );
+        } catch (pushError) {
+          console.error(`[Completion] Failed to push to GitHub:`, pushError);
+          await logToolExecution(
+            jobId,
+            'attempt_completion',
+            'warning',
+            `Failed to push to GitHub: ${pushError instanceof Error ? pushError.message : 'Unknown error'}`
+          );
+        }
+      }
+    } finally {
+      git.cleanup();
+    }
+  } catch (gitError) {
+    console.error(`[Completion] Git operation failed:`, gitError);
+    await logToolExecution(
+      jobId,
+      'attempt_completion',
+      'warning',
+      `Git commit failed: ${gitError instanceof Error ? gitError.message : 'Unknown error'}`
+    );
+  }
+
   // Update job and project status atomically in a transaction
   try {
     await db.transaction(async (tx) => {
@@ -401,7 +576,12 @@ async function handleAttemptCompletion(
           status = 'completed',
           progress = 100,
           current_step = 'Generation completed',
-          completed_at = NOW()
+          completed_at = NOW(),
+          metadata = jsonb_set(
+            COALESCE(metadata, '{}'::jsonb),
+            '{commit_hash}',
+            ${commitHash ? `"${commitHash}"` : 'null'}
+          )
         WHERE id = ${jobId}
       `;
 
@@ -409,7 +589,8 @@ async function handleAttemptCompletion(
         UPDATE projects
         SET
           generation_status = 'completed',
-          deployment_status = ${deploymentStatus}
+          deployment_status = ${deploymentStatus},
+          current_commit_hash = ${commitHash}
         WHERE id = ${projectId}
       `;
     });
@@ -427,6 +608,7 @@ async function handleAttemptCompletion(
     command,
     previewUrl,
     deploymentStatus,
+    commitHash,
     completedAt: new Date().toISOString()
   };
 }
