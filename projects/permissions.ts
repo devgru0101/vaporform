@@ -154,7 +154,7 @@ export async function checkProjectCreationLimit(
   if (currentCount >= maxCount) {
     return {
       allowed: false,
-      reason: `Project limit reached. Your ${user.subscription_tier} tier allows ${maxCount} projects. Upgrade to create more.`,
+      reason: `Project limit reached. Your ${subscriptionTier} tier allows ${maxCount} projects. Upgrade to create more.`,
       currentCount,
       maxCount,
     };

@@ -58,7 +58,7 @@ export const DOCKER_CPU_LIMIT_TEAM = '4';
 
 // Deployment
 export const SUBDOMAIN_REGEX = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-export const BASE_DOMAIN = process.env.BASE_DOMAIN || 'vaporform.dev';
+export const BASE_DOMAIN = 'vaporform.dev';
 
 // Rate limiting
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes

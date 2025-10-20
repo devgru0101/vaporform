@@ -55,6 +55,9 @@ export interface Project {
   deployment_status: 'none' | 'building' | 'deployed' | 'failed';
   storage_used_bytes: bigint;
   compute_minutes_used: number;
+  github_imported_from?: string;
+  github_imported_branch?: string;
+  github_import_date?: Date;
   created_at: Date;
   updated_at: Date;
   deleted_at?: Date;

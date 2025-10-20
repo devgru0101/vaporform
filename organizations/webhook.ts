@@ -25,10 +25,20 @@ export const clerkOrgWebhook = api.raw(
   { expose: true, path: '/webhooks/clerk/organization', method: 'POST' },
   async (req, resp) => {
     try {
-      const body = await req.text();
+      // Read body from IncomingMessage stream
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = Buffer.concat(chunks).toString('utf-8');
+
       const headers: Record<string, string> = {};
-      req.headers.forEach((value, key) => {
-        headers[key] = value;
+      Object.entries(req.headers).forEach(([key, value]: [string, any]) => {
+        if (typeof value === 'string') {
+          headers[key] = value;
+        } else if (Array.isArray(value)) {
+          headers[key] = value[0];
+        }
       });
 
       const evt = verifyClerkWebhook(body, headers);

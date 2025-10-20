@@ -21,13 +21,21 @@ export const clerkUserWebhook = api.raw(
   { expose: true, path: '/webhooks/clerk/user', method: 'POST' },
   async (req, resp) => {
     try {
-      // Read the raw body
-      const body = await req.text();
+      // Read body from IncomingMessage stream
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = Buffer.concat(chunks).toString('utf-8');
 
       // Get headers as a plain object
       const headers: Record<string, string> = {};
-      req.headers.forEach((value, key) => {
-        headers[key] = value;
+      Object.entries(req.headers).forEach(([key, value]: [string, any]) => {
+        if (typeof value === 'string') {
+          headers[key] = value;
+        } else if (Array.isArray(value)) {
+          headers[key] = value[0];
+        }
       });
 
       // Verify the webhook signature

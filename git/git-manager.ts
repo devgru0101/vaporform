@@ -439,6 +439,156 @@ export class GitManager {
   }
 
   /**
+   * Clone a GitHub repository
+   */
+  async cloneRepository(repoUrl: string, pat: string, branch: string): Promise<void> {
+    console.log(`Cloning repository ${repoUrl} (branch: ${branch})...`);
+
+    // Build authenticated URL
+    const urlWithAuth = repoUrl.replace('https://', `https://${pat}@`);
+
+    try {
+      // Clone the repository with the specified branch
+      await this.git.clone(urlWithAuth, this.workdir, ['--branch', branch, '--single-branch']);
+      console.log(`✓ Successfully cloned repository to ${this.workdir}`);
+    } catch (error) {
+      console.error(`Failed to clone repository:`, error);
+      throw new ValidationError(`Failed to clone repository: ${error}`);
+    }
+  }
+
+  /**
+   * Sync files from working directory to VFS
+   */
+  async syncToVFS(projectId: bigint): Promise<void> {
+    console.log(`Syncing files to VFS for project ${projectId}...`);
+
+    // Get all files from working directory (excluding .git)
+    const { readdirSync, statSync } = await import('fs');
+    const { join } = await import('path');
+
+    const walkDirectory = (dir: string, baseDir: string = dir): string[] => {
+      const files: string[] = [];
+      const entries = readdirSync(dir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        const relativePath = fullPath.substring(baseDir.length);
+
+        // Skip .git directory
+        if (entry.name === '.git') {
+          continue;
+        }
+
+        if (entry.isDirectory()) {
+          files.push(...walkDirectory(fullPath, baseDir));
+        } else if (entry.isFile()) {
+          files.push(relativePath);
+        }
+      }
+
+      return files;
+    };
+
+    const filePaths = walkDirectory(this.workdir);
+    console.log(`Found ${filePaths.length} files to sync to VFS`);
+
+    // Upload each file to VFS
+    for (const relativePath of filePaths) {
+      try {
+        const fullPath = join(this.workdir, relativePath);
+        const content = readFileSync(fullPath);
+
+        // Determine mime type based on extension
+        const ext = relativePath.substring(relativePath.lastIndexOf('.') + 1).toLowerCase();
+        const mimeTypes: Record<string, string> = {
+          js: 'text/javascript',
+          ts: 'text/typescript',
+          tsx: 'text/typescript',
+          jsx: 'text/javascript',
+          json: 'application/json',
+          md: 'text/markdown',
+          html: 'text/html',
+          css: 'text/css',
+          py: 'text/x-python',
+          go: 'text/x-go',
+          rs: 'text/x-rust',
+          txt: 'text/plain',
+        };
+        const mimeType = mimeTypes[ext] || 'application/octet-stream';
+
+        await gridfs.writeFile(projectId, relativePath, content, mimeType);
+      } catch (error) {
+        console.warn(`Warning: Could not sync file ${relativePath} to VFS:`, error);
+      }
+    }
+
+    console.log(`✓ Synced ${filePaths.length} files to VFS for project ${projectId}`);
+  }
+
+  /**
+   * Initialize Git tracking from an existing cloned repository
+   */
+  async initFromExisting(projectId: bigint, defaultBranch: string): Promise<void> {
+    console.log(`Initializing Git tracking for existing repository (project ${projectId})...`);
+
+    // Check if already initialized
+    const existing = await db.queryRow<{ id: bigint }>`
+      SELECT id FROM git_branches
+      WHERE project_id = ${projectId}
+      LIMIT 1
+    `;
+
+    if (existing) {
+      console.log(`Git already initialized for project ${projectId}`);
+      return;
+    }
+
+    // Get current commit hash
+    const log = await this.git.log({ maxCount: 1 });
+    if (!log.latest) {
+      throw new ValidationError('No commits found in repository');
+    }
+
+    const commitHash = log.latest.hash;
+    const authorName = log.latest.author_name;
+    const authorEmail = log.latest.author_email;
+    const message = log.latest.message;
+    const timestamp = new Date(log.latest.date);
+
+    // Store branch
+    await db.exec`
+      INSERT INTO git_branches (project_id, name, commit_hash, is_default)
+      VALUES (${projectId}, ${defaultBranch}, ${commitHash}, true)
+    `;
+
+    // Store initial commit
+    await db.exec`
+      INSERT INTO git_commits (
+        project_id,
+        commit_hash,
+        author_name,
+        author_email,
+        message,
+        parent_hash,
+        timestamp,
+        files_changed
+      ) VALUES (
+        ${projectId},
+        ${commitHash},
+        ${authorName},
+        ${authorEmail},
+        ${message},
+        NULL,
+        ${timestamp},
+        0
+      )
+    `;
+
+    console.log(`✓ Initialized Git tracking for project ${projectId} on branch ${defaultBranch}`);
+  }
+
+  /**
    * Clean up working directory
    */
   cleanup(): void {

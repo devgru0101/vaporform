@@ -64,7 +64,7 @@ interface BatchUpsertResponse {
 interface DeleteBySourceRequest {
   authorization: Header<'Authorization'>;
   projectId: string;
-  contentType: string; // 'code' or 'chat'
+  contentType: string; // Encore doesn't support custom types in path params
   sourcePath: string;
 }
 
@@ -209,7 +209,7 @@ export const deleteBySource = api(
 
     const deleted = await qdrantManager.deleteBySource(
       projectId,
-      req.contentType,
+      req.contentType as ContentType,
       req.sourcePath
     );
 

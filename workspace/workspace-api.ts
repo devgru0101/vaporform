@@ -3,10 +3,11 @@
  * Provides Daytona workspace management with RBAC
  */
 
-import { api, Header } from 'encore.dev/api';
+import { api, Header, Query, APIError } from 'encore.dev/api';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { daytonaManager } from './daytona-manager.js';
+import { buildManager } from './build-manager.js';
 import { ValidationError, toAPIError } from '../shared/errors.js';
 import { db as projectDB } from '../projects/db.js';
 
@@ -31,6 +32,7 @@ interface GetWorkspaceRequest {
 interface GetProjectWorkspaceRequest {
   authorization: Header<'Authorization'>;
   projectId: string;
+  waitForReady?: Query<boolean>; // Poll until workspace reaches running status
 }
 
 interface StopWorkspaceRequest {
@@ -143,8 +145,11 @@ export const getWorkspace = api(
     const { userId } = await verifyClerkJWT(req.authorization);
     const workspaceId = BigInt(req.workspaceId);
 
-    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    let workspace = await daytonaManager.getWorkspace(workspaceId);
     await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    // Sync status with Daytona API before returning
+    workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
 
     return { workspace };
   }
@@ -194,26 +199,113 @@ export const getProjectWorkspace = api(
       });
 
       console.log(`[Workspace Manager] ✓ Created Daytona workspace for project ${projectId}`);
-    } else if (workspace.status === 'stopped') {
-      // Workspace exists but stopped - restart it
+    } else if (workspace && workspace.status === 'stopped') {
+      // Workspace exists but stopped - restart it with retry logic
       console.log(`[Workspace Manager] Auto-starting stopped workspace for project ${projectId}`);
-      await daytonaManager.restartWorkspace(workspace.id);
-      console.log(`[Workspace Manager] ✓ Restarted workspace for project ${projectId}`);
 
-      // Refresh workspace status
-      workspace = await daytonaManager.getProjectWorkspace(projectId);
-    } else if (workspace.status === 'error') {
-      // Workspace in error state - try to recover
+      const workspaceId = workspace.id; // Capture ID for TypeScript null safety
+      let retries = 0;
+      const maxRetries = 3;
+      let lastError: Error | null = null;
+      let restarted = false;
+
+      while (retries < maxRetries && !restarted) {
+        try {
+          await daytonaManager.restartWorkspace(workspaceId);
+          console.log(`[Workspace Manager] ✓ Restarted workspace for project ${projectId} (attempt ${retries + 1})`);
+          restarted = true;
+
+          // Refresh workspace status
+          workspace = await daytonaManager.getProjectWorkspace(projectId);
+        } catch (error) {
+          lastError = error as Error;
+          retries++;
+
+          if (retries < maxRetries) {
+            const backoffMs = retries * 2000; // Exponential backoff: 2s, 4s, 6s
+            console.log(`[Workspace Manager] Restart attempt ${retries} failed: ${lastError.message}. Retrying in ${backoffMs / 1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+          }
+        }
+      }
+
+      if (!restarted && lastError) {
+        console.log(`[Workspace Manager] ✗ Failed to restart stopped workspace after ${maxRetries} attempts: ${lastError.message}`);
+        console.log(`[Workspace Manager] Returning workspace in stopped state - frontend will handle this`);
+        // Don't throw - let the frontend handle the stopped state
+      }
+    } else if (workspace && workspace.status === 'error') {
+      // Workspace in error state - try to recover with retry logic
       console.log(`[Workspace Manager] Attempting to recover errored workspace for project ${projectId}`);
-      await daytonaManager.restartWorkspace(workspace.id);
-      console.log(`[Workspace Manager] ✓ Recovered workspace for project ${projectId}`);
 
-      // Refresh workspace status
-      workspace = await daytonaManager.getProjectWorkspace(projectId);
+      const workspaceId = workspace.id; // Capture ID for TypeScript null safety
+      let retries = 0;
+      const maxRetries = 3;
+      let lastError: Error | null = null;
+      let recovered = false;
+
+      while (retries < maxRetries && !recovered) {
+        try {
+          await daytonaManager.restartWorkspace(workspaceId);
+          console.log(`[Workspace Manager] ✓ Recovered workspace for project ${projectId} (attempt ${retries + 1})`);
+          recovered = true;
+
+          // Refresh workspace status
+          workspace = await daytonaManager.getProjectWorkspace(projectId);
+        } catch (error) {
+          lastError = error as Error;
+          retries++;
+
+          if (retries < maxRetries) {
+            const backoffMs = retries * 2000; // Exponential backoff: 2s, 4s, 6s
+            console.log(`[Workspace Manager] Recovery attempt ${retries} failed: ${lastError.message}. Retrying in ${backoffMs / 1000}s...`);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+          }
+        }
+      }
+
+      if (!recovered && lastError) {
+        console.log(`[Workspace Manager] ✗ Failed to recover errored workspace after ${maxRetries} attempts: ${lastError.message}`);
+        console.log(`[Workspace Manager] Returning workspace in error state - frontend will handle this`);
+        // Don't throw - let the frontend handle the error state
+      }
     } else if (workspace.status === 'running') {
       console.log(`[Workspace Manager] Workspace already running for project ${projectId}`);
     } else {
       console.log(`[Workspace Manager] Workspace status for project ${projectId}: ${workspace.status}`);
+    }
+
+    // Sync status with Daytona API before returning
+    if (workspace) {
+      workspace = await daytonaManager.syncWorkspaceStatus(workspace.id);
+    }
+
+    // NEW: If waitForReady=true, poll until workspace reaches running status
+    if (req.waitForReady && workspace && workspace.status !== 'running') {
+      console.log(`[Workspace Manager] Polling until workspace ${workspace.id} reaches running status...`);
+
+      const maxAttempts = 30; // 60 seconds max (30 attempts * 2 seconds)
+      let attempts = 0;
+
+      while (attempts < maxAttempts && workspace.status !== 'running') {
+        // Don't wait if workspace is in error or deleted state
+        if (workspace.status === 'error' || workspace.status === 'deleted') {
+          console.log(`[Workspace Manager] Workspace entered terminal state: ${workspace.status}`);
+          break;
+        }
+
+        attempts++;
+        console.log(`[Workspace Manager] Waiting for workspace... (${attempts}/${maxAttempts}, current status: ${workspace.status})`);
+
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+        workspace = await daytonaManager.syncWorkspaceStatus(workspace.id);
+      }
+
+      if (workspace.status === 'running') {
+        console.log(`[Workspace Manager] ✓ Workspace reached running status after ${attempts * 2} seconds`);
+      } else {
+        console.log(`[Workspace Manager] ⚠ Workspace did not reach running status (final status: ${workspace.status})`);
+      }
     }
 
     return { workspace };
@@ -235,6 +327,27 @@ export const stopWorkspace = api(
     await daytonaManager.stopWorkspace(workspaceId);
 
     return { success: true };
+  }
+);
+
+/**
+ * Restart a workspace
+ */
+export const restartWorkspace = api(
+  { method: 'POST', path: '/workspace/:workspaceId/restart' },
+  async (req: StopWorkspaceRequest): Promise<{ workspace: any }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    await daytonaManager.restartWorkspace(workspaceId);
+
+    // Get updated workspace status
+    const updatedWorkspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
+
+    return { workspace: updatedWorkspace };
   }
 );
 
@@ -295,13 +408,41 @@ export const forceRebuildWorkspace = api(
     }
 
     const workspaceName = `${project.name} Workspace`;
-    const template = project.template || 'typescript';
 
-    console.log(`[Force Rebuild] Creating new workspace for project ${projectId} (${project.name})`);
+    // Detect language from project files (for GitHub imports) or use template
+    let detectedLanguage = project.template || 'typescript';
+
+    if (project.template === 'github-import' || !project.template) {
+      // Detect language from files in VFS
+      const { gridfs } = await import('../vfs/gridfs.js');
+      try {
+        // Check for package.json (Node.js/TypeScript)
+        const packageJsonBuffer = await gridfs.readFile(projectId, '/package.json');
+        if (packageJsonBuffer) {
+          detectedLanguage = 'typescript';
+          console.log(`[Force Rebuild] Detected Node.js/TypeScript project from package.json`);
+        }
+      } catch {
+        // Check for requirements.txt (Python)
+        try {
+          const reqBuffer = await gridfs.readFile(projectId, '/requirements.txt');
+          if (reqBuffer) {
+            detectedLanguage = 'python';
+            console.log(`[Force Rebuild] Detected Python project from requirements.txt`);
+          }
+        } catch {
+          // Default to typescript
+          detectedLanguage = 'typescript';
+          console.log(`[Force Rebuild] Could not detect language, defaulting to TypeScript`);
+        }
+      }
+    }
+
+    console.log(`[Force Rebuild] Creating new workspace for project ${projectId} (${project.name}) with language: ${detectedLanguage}`);
 
     // Create new workspace
     const newWorkspace = await daytonaManager.createWorkspace(projectId, workspaceName, {
-      language: template,
+      language: detectedLanguage,
       environment: {
         PROJECT_ID: projectId.toString(),
         PROJECT_NAME: project.name,
@@ -313,9 +454,108 @@ export const forceRebuildWorkspace = api(
 
     console.log(`[Force Rebuild] ✓ Created new workspace ${newWorkspace.id} for project ${projectId}`);
 
+    // Deploy files from VFS to Daytona sandbox (in background)
+    // This copies all project files from GridFS to the actual sandbox
+    deployProjectFilesInBackground(newWorkspace.id, projectId).catch(err => {
+      console.error(`[Force Rebuild] Failed to deploy files from VFS to sandbox:`, err);
+    });
+
     return { workspace: newWorkspace };
   }
 );
+
+/**
+ * Deploy project files from VFS to Daytona sandbox (background task)
+ */
+async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bigint): Promise<void> {
+  console.log(`[Force Rebuild] Starting file deployment from VFS to workspace ${workspaceId}...`);
+
+  // Wait for workspace to be fully running before deploying files
+  let retries = 0;
+  const maxRetries = 30; // 30 seconds max wait
+
+  while (retries < maxRetries) {
+    try {
+      const workspace = await daytonaManager.getWorkspace(workspaceId);
+
+      if (workspace.status === 'running' && workspace.daytona_sandbox_id) {
+        console.log(`[Force Rebuild] Workspace ${workspaceId} is running, deploying files...`);
+
+        try {
+          const result = await daytonaManager.deployProjectFromVFS(workspaceId, projectId);
+          console.log(`[Force Rebuild] ✓ Deployed ${result.filesDeployed} files from VFS to workspace ${workspaceId}`);
+
+          // Trigger build process after files are deployed
+          console.log(`[Force Rebuild] Starting build process for workspace ${workspaceId}...`);
+          await buildProjectAfterDeploy(workspaceId, projectId).catch(buildError => {
+            console.error(`[Force Rebuild] Build failed:`, buildError);
+            // Don't throw - file deployment was successful
+          });
+
+          return;
+        } catch (deployError) {
+          console.error(`[Force Rebuild] Error deploying files:`, deployError);
+          throw deployError;
+        }
+      }
+
+      console.log(`[Force Rebuild] Waiting for workspace ${workspaceId} to be running (status: ${workspace.status}, sandbox: ${workspace.daytona_sandbox_id || 'NONE'})...`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      retries++;
+    } catch (error) {
+      console.error(`[Force Rebuild] Error checking workspace status:`, error);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      retries++;
+    }
+  }
+
+  console.error(`[Force Rebuild] ✗ Timed out waiting for workspace ${workspaceId} to be running - files not deployed!`);
+}
+
+/**
+ * Build project after file deployment (background task)
+ */
+async function buildProjectAfterDeploy(workspaceId: bigint, projectId: bigint): Promise<void> {
+  console.log(`[Build] Starting build for project ${projectId} in workspace ${workspaceId}`);
+
+  try {
+    // 1. Detect tech stack
+    const techStack = await daytonaManager.detectTechStack(workspaceId, projectId);
+    console.log(`[Build] Detected tech stack: ${techStack.language} / ${techStack.framework}`);
+
+    // 2. Install dependencies
+    console.log(`[Build] Installing dependencies...`);
+    const installResult = await daytonaManager.installDependencies(workspaceId, techStack);
+
+    if (!installResult.success) {
+      console.error(`[Build] Dependency installation failed:`, installResult.output);
+      throw new Error(`Dependency installation failed: ${installResult.output}`);
+    }
+
+    console.log(`[Build] ✓ Dependencies installed successfully`);
+
+    // 3. Check if project has a build script
+    const buildCommand = await daytonaManager.inferBuildCommand(workspaceId);
+
+    if (buildCommand) {
+      console.log(`[Build] Running build command: ${buildCommand}`);
+      const buildResult = await daytonaManager.executeCommand(workspaceId, buildCommand);
+
+      if (buildResult.exitCode === 0) {
+        console.log(`[Build] ✓ Build completed successfully`);
+      } else {
+        console.error(`[Build] Build failed with exit code ${buildResult.exitCode}`);
+        console.error(`[Build] Build output:`, buildResult.stdout);
+        console.error(`[Build] Build errors:`, buildResult.stderr);
+      }
+    } else {
+      console.log(`[Build] No build command found, skipping build step`);
+    }
+  } catch (error) {
+    console.error(`[Build] Build process failed:`, error);
+    throw error;
+  }
+}
 
 /**
  * Execute command in workspace
@@ -392,6 +632,105 @@ export const listBuilds = api(
 );
 
 /**
+ * Create and start a new build with detailed tracking
+ */
+interface CreateBuildRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+  workspaceId: string;
+  metadata?: Record<string, any>;
+}
+
+export const createBuild = api(
+  { method: 'POST', path: '/workspace/build/create' },
+  async (req: CreateBuildRequest): Promise<{ build: any }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+    const workspaceId = BigInt(req.workspaceId);
+
+    await ensureProjectPermission(userId, projectId, 'deploy');
+
+    // Create build with detailed tracking
+    const build = await buildManager.createBuild(projectId, workspaceId, req.metadata);
+
+    // Start build process in background
+    buildManager.startBuild(build.id).catch(err => {
+      console.error(`Build ${build.id} failed:`, err);
+    });
+
+    return { build };
+  }
+);
+
+/**
+ * Get detailed build information
+ */
+interface GetBuildDetailsRequest {
+  authorization: Header<'Authorization'>;
+  buildId: string;
+}
+
+export const getBuildDetails = api(
+  { method: 'GET', path: '/workspace/build/:buildId/details' },
+  async (req: GetBuildDetailsRequest): Promise<{ build: any }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const buildId = BigInt(req.buildId);
+
+    const build = await buildManager.getBuild(buildId);
+    await ensureProjectPermission(userId, build.project_id, 'view');
+
+    return { build };
+  }
+);
+
+/**
+ * Get build events (real-time progress tracking)
+ */
+interface GetBuildEventsRequest {
+  authorization: Header<'Authorization'>;
+  buildId: string;
+  limit?: number;
+}
+
+export const getBuildEvents = api(
+  { method: 'GET', path: '/workspace/build/:buildId/events' },
+  async (req: GetBuildEventsRequest): Promise<{ events: any[] }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const buildId = BigInt(req.buildId);
+
+    const build = await buildManager.getBuild(buildId);
+    await ensureProjectPermission(userId, build.project_id, 'view');
+
+    const events = await buildManager.getBuildEvents(buildId, req.limit || 100);
+
+    return { events };
+  }
+);
+
+/**
+ * List builds with detailed information
+ */
+interface ListBuildsDetailedRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+  limit?: number;
+}
+
+export const listBuildsDetailed = api(
+  { method: 'GET', path: '/workspace/builds/:projectId/detailed' },
+  async (req: ListBuildsDetailedRequest): Promise<{ builds: any[] }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'view');
+
+    const builds = await buildManager.listBuilds(projectId, req.limit || 20);
+
+    return { builds };
+  }
+);
+
+/**
  * Get workspace logs
  */
 export const getLogs = api(
@@ -400,8 +739,11 @@ export const getLogs = api(
     const { userId } = await verifyClerkJWT(req.authorization);
     const workspaceId = BigInt(req.workspaceId);
 
-    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    let workspace = await daytonaManager.getWorkspace(workspaceId);
     await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    // Sync status with Daytona API before fetching logs
+    workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
 
     const logs = await daytonaManager.getLogs(workspaceId, req.limit || 100);
 
@@ -454,19 +796,381 @@ export const readFile = api(
 );
 
 /**
- * Get sandbox preview URL
+ * Get sandbox preview URL with authentication token
  */
 export const getSandboxUrl = api(
   { method: 'GET', path: '/workspace/:workspaceId/url' },
+  async (req: GetSandboxUrlRequest): Promise<{ url: string | null; token?: string; port?: number }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    let workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    // Sync status with Daytona API before getting URL
+    workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
+
+    const previewInfo = await daytonaManager.getSandboxUrl(workspaceId);
+
+    if (!previewInfo) {
+      return { url: null };
+    }
+
+    return {
+      url: previewInfo.url,
+      token: previewInfo.token,
+      port: previewInfo.port
+    };
+  }
+);
+
+/**
+ * Get terminal URL for Daytona web terminal (port 22222)
+ * Returns the URL to access the Daytona web-based terminal for this workspace
+ */
+export const getTerminalUrl = api(
+  { method: 'GET', path: '/workspace/:workspaceId/terminal-url' },
   async (req: GetSandboxUrlRequest): Promise<{ url: string | null }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    let workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    // Sync status with Daytona API before getting terminal URL
+    workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
+
+    // Get terminal URL (Daytona web terminal on port 22222)
+    const url = await daytonaManager.getTerminalUrl(workspaceId);
+
+    if (!url) {
+      console.log(`[Terminal API] No terminal URL available for workspace ${workspaceId} - sandbox may not be running or is a mock sandbox`);
+    }
+
+    return { url };
+  }
+);
+
+interface RunProjectRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+}
+
+/**
+ * Run project and get preview URL
+ * This orchestrates: install dependencies, start dev server, get preview URL
+ */
+export const runProject = api(
+  { method: 'POST', path: '/workspace/run/:projectId' },
+  async (req: RunProjectRequest): Promise<{
+    success: boolean;
+    previewUrl: string | null;
+    port: number | null;
+    message: string;
+  }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'edit');
+
+    console.log(`[Run Project] Starting project ${projectId}`);
+
+    // Get workspace for project (create if doesn't exist)
+    let workspace = await daytonaManager.getProjectWorkspace(projectId);
+
+    if (!workspace) {
+      // Create workspace if missing
+      const project = await projectDB.queryRow<{ id: bigint; name: string; template: string | null }>`
+        SELECT id, name, template FROM projects WHERE id = ${projectId}
+      `;
+
+      if (!project) {
+        throw new Error(`Project ${projectId} not found`);
+      }
+
+      workspace = await daytonaManager.createWorkspace(projectId, `${project.name} Workspace`, {
+        language: project.template || 'typescript',
+        environment: {
+          PROJECT_ID: projectId.toString(),
+          PROJECT_NAME: project.name,
+        },
+        autoStopInterval: 60,
+        autoArchiveInterval: 24 * 60,
+        ephemeral: false,
+      });
+
+      // Wait for workspace to be running
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      workspace = await daytonaManager.getWorkspace(workspace.id);
+    }
+
+    if (workspace.status !== 'running') {
+      return {
+        success: false,
+        previewUrl: null,
+        port: null,
+        message: `Workspace is not running (status: ${workspace.status})`
+      };
+    }
+
+    try {
+      // 1. Detect tech stack
+      console.log(`[Run Project] Detecting tech stack...`);
+      const techStack = await daytonaManager.detectTechStack(workspace.id, projectId);
+      console.log(`[Run Project] Detected: ${techStack.language} / ${techStack.framework}`);
+
+      // 2. Install dependencies
+      console.log(`[Run Project] Installing dependencies...`);
+      const installResult = await daytonaManager.installDependencies(workspace.id, techStack);
+
+      if (!installResult.success) {
+        return {
+          success: false,
+          previewUrl: null,
+          port: null,
+          message: `Dependency installation failed: ${installResult.output.substring(0, 200)}`
+        };
+      }
+
+      // 3. Infer dev command from package.json
+      console.log(`[Run Project] Inferring dev command...`);
+      const devCommand = await daytonaManager.inferDevCommand(workspace.id);
+
+      if (!devCommand) {
+        return {
+          success: false,
+          previewUrl: null,
+          port: null,
+          message: 'Could not infer dev command from package.json. Please ensure your project has a "dev" or "start" script.'
+        };
+      }
+
+      console.log(`[Run Project] Starting dev server with command: ${devCommand}`);
+
+      // 4. Start dev server (in background)
+      const startResult = await daytonaManager.startDevServer(workspace.id, devCommand);
+
+      if (!startResult.processStarted) {
+        return {
+          success: false,
+          previewUrl: null,
+          port: null,
+          message: 'Failed to start dev server'
+        };
+      }
+
+      const port = startResult.detectedPort || daytonaManager.detectPortFromCommand(devCommand);
+      console.log(`[Run Project] Dev server started on port ${port}`);
+
+      // 5. Get preview URL
+      console.log(`[Run Project] Getting preview URL for port ${port}...`);
+      const previewResult = await daytonaManager.getPreviewUrl(workspace.id, port);
+
+      if (!previewResult) {
+        return {
+          success: true,
+          previewUrl: null,
+          port,
+          message: `Dev server started on port ${port}, but preview URL not available yet. The server may still be starting up.`
+        };
+      }
+
+      console.log(`[Run Project] ✓ Project running at: ${previewResult.url}`);
+
+      return {
+        success: true,
+        previewUrl: previewResult.url,
+        port: previewResult.port,
+        message: `Project is running successfully`
+      };
+
+    } catch (error) {
+      console.error(`[Run Project] Error:`, error);
+      return {
+        success: false,
+        previewUrl: null,
+        port: null,
+        message: error instanceof Error ? error.message : 'Unknown error'
+      };
+    }
+  }
+);
+
+// ============================================================================
+// PTY Session Management Endpoints
+// ============================================================================
+
+interface CreatePtySessionRequest {
+  authorization: Header<'Authorization'>;
+  workspaceId: string;
+  command: string;
+  cols?: number;
+  rows?: number;
+}
+
+interface SendPtyInputRequest {
+  authorization: Header<'Authorization'>;
+  sessionId: string;
+  input: string;
+}
+
+interface GetPtyStatusRequest {
+  authorization: Header<'Authorization'>;
+  sessionId: string;
+}
+
+interface KillPtySessionRequest {
+  authorization: Header<'Authorization'>;
+  sessionId: string;
+}
+
+interface ListPtySessionsRequest {
+  authorization: Header<'Authorization'>;
+  workspaceId: string;
+}
+
+interface StartDevServerRequest {
+  authorization: Header<'Authorization'>;
+  workspaceId: string;
+  command: string;
+}
+
+/**
+ * Create a new PTY session for interactive command execution
+ * Perfect for long-running processes like dev servers
+ */
+export const createPtySession = api(
+  { method: 'POST', path: '/workspace/:workspaceId/pty' },
+  async (req: CreatePtySessionRequest): Promise<{
+    sessionId: string;
+    output?: string[];
+  }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    return await daytonaManager.createPtySession(workspaceId, req.command, {
+      cols: req.cols,
+      rows: req.rows,
+      captureOutput: true,
+    });
+  }
+);
+
+/**
+ * Send input to an active PTY session
+ */
+export const sendPtyInput = api(
+  { method: 'POST', path: '/workspace/pty/:sessionId/input' },
+  async (req: SendPtyInputRequest): Promise<{ success: boolean }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+
+    // Extract workspace ID from session ID
+    const match = req.sessionId.match(/pty-(\d+)-/);
+    if (!match) {
+      throw new ValidationError('Invalid session ID format');
+    }
+    const workspaceId = BigInt(match[1]);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    await daytonaManager.sendPtyInput(req.sessionId, req.input);
+    return { success: true };
+  }
+);
+
+/**
+ * Get status of a PTY session
+ */
+export const getPtyStatus = api(
+  { method: 'GET', path: '/workspace/pty/:sessionId/status' },
+  async (req: GetPtyStatusRequest): Promise<{
+    exists: boolean;
+    connected: boolean;
+    exitCode?: number;
+    error?: string;
+  }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+
+    // Extract workspace ID from session ID
+    const match = req.sessionId.match(/pty-(\d+)-/);
+    if (!match) {
+      throw new ValidationError('Invalid session ID format');
+    }
+    const workspaceId = BigInt(match[1]);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    return daytonaManager.getPtyStatus(req.sessionId);
+  }
+);
+
+/**
+ * Kill a PTY session
+ */
+export const killPtySession = api(
+  { method: 'POST', path: '/workspace/pty/:sessionId/kill' },
+  async (req: KillPtySessionRequest): Promise<{ success: boolean }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+
+    // Extract workspace ID from session ID
+    const match = req.sessionId.match(/pty-(\d+)-/);
+    if (!match) {
+      throw new ValidationError('Invalid session ID format');
+    }
+    const workspaceId = BigInt(match[1]);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    await daytonaManager.killPtySession(req.sessionId);
+    return { success: true };
+  }
+);
+
+/**
+ * List all active PTY sessions for a workspace
+ */
+export const listPtySessions = api(
+  { method: 'GET', path: '/workspace/:workspaceId/pty/list' },
+  async (req: ListPtySessionsRequest): Promise<{
+    sessions: Array<{
+      sessionId: string;
+      connected: boolean;
+      exitCode?: number;
+    }>;
+  }> => {
     const { userId } = await verifyClerkJWT(req.authorization);
     const workspaceId = BigInt(req.workspaceId);
 
     const workspace = await daytonaManager.getWorkspace(workspaceId);
     await ensureProjectPermission(userId, workspace.project_id, 'view');
 
-    const url = await daytonaManager.getSandboxUrl(workspaceId);
+    const sessions = daytonaManager.listPtySessions(workspaceId);
+    return { sessions };
+  }
+);
 
-    return { url };
+/**
+ * Start dev server using PTY (recommended for long-running processes)
+ */
+export const startDevServer = api(
+  { method: 'POST', path: '/workspace/:workspaceId/dev-server' },
+  async (req: StartDevServerRequest): Promise<{
+    sessionId: string;
+    success: boolean;
+    message: string;
+  }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    return await daytonaManager.startDevServerWithPty(workspaceId, req.command);
   }
 );

@@ -5,9 +5,15 @@
 
 import { QdrantClient } from '@qdrant/js-client-rest';
 import OpenAI from 'openai';
+import { secret } from 'encore.dev/config';
 import { SQLDatabase } from 'encore.dev/storage/sqldb';
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+
+// Define vector database secrets
+const openAIAPIKey = secret("OpenAIAPIKey");
+const qdrantURL = secret("QdrantURL");
+const qdrantAPIKey = secret("QdrantAPIKey");
 
 const db = new SQLDatabase('vector', {
   migrations: './migrations',
@@ -39,30 +45,52 @@ export class QdrantManager {
   private readonly embeddingModel = 'text-embedding-3-small';
   private readonly embeddingDimension = 1536;
 
-  constructor() {
-    const qdrantUrl = process.env.QDRANT_URL || 'http://localhost:6333';
-    const qdrantApiKey = process.env.QDRANT_API_KEY;
-    const openaiApiKey = process.env.OPENAI_API_KEY;
+  private initialized = false;
 
-    // Warn if using default URL
-    if (!process.env.QDRANT_URL) {
-      console.warn('[Vector Service] QDRANT_URL not set, using default: http://localhost:6333');
+  constructor() {
+    // Lazy initialization - clients will be initialized on first use
+  }
+
+  /**
+   * Initialize Qdrant and OpenAI clients (called lazily on first use)
+   */
+  private initialize() {
+    if (this.initialized) {
+      return;
     }
 
-    this.client = new QdrantClient({
-      url: qdrantUrl,
-      ...(qdrantApiKey && { apiKey: qdrantApiKey }),
-    });
+    try {
+      const url = qdrantURL();
+      const apiKey = qdrantAPIKey();
 
-    // Initialize OpenAI only if API key is provided
-    if (openaiApiKey && openaiApiKey.startsWith('sk-')) {
-      this.openai = new OpenAI({
-        apiKey: openaiApiKey,
+      this.client = new QdrantClient({
+        url,
+        ...(apiKey && { apiKey }),
       });
-    } else {
-      // Stub for development without OpenAI key
+
+      console.log(`✓ Qdrant client initialized (URL: ${url})`);
+    } catch (error) {
+      console.error('[Vector Service] Failed to initialize Qdrant client:', error);
+      throw error;
+    }
+
+    // Initialize OpenAI for embeddings
+    try {
+      const apiKey = openAIAPIKey();
+
+      if (!apiKey || !apiKey.startsWith('sk-')) {
+        console.warn('[Vector Service] OpenAI API key not configured - embeddings will not work');
+        this.openai = {} as OpenAI;
+      } else {
+        this.openai = new OpenAI({ apiKey });
+        console.log('✓ OpenAI client initialized for embeddings');
+      }
+    } catch (error) {
+      console.warn('[Vector Service] OpenAI secret not configured - embeddings disabled');
       this.openai = {} as OpenAI;
     }
+
+    this.initialized = true;
   }
 
   /**
@@ -76,6 +104,7 @@ export class QdrantManager {
    * Initialize collections for a project
    */
   async initializeProject(projectId: bigint): Promise<void> {
+    this.initialize();
     const contentTypes: ContentType[] = ['code', 'chat', 'documentation', 'error'];
 
     for (const contentType of contentTypes) {
@@ -131,6 +160,7 @@ export class QdrantManager {
     content: string,
     metadata: Partial<EmbeddingMetadata> = {}
   ): Promise<string> {
+    this.initialize();
     const collectionName = this.getCollectionName(projectId, contentType);
     const contentHash = this.calculateHash(content);
 
@@ -227,6 +257,7 @@ export class QdrantManager {
     limit: number = 5,
     scoreThreshold: number = 0.7
   ): Promise<SearchResult[]> {
+    this.initialize();
     const collectionName = this.getCollectionName(projectId, contentType);
 
     // Generate query embedding
@@ -259,6 +290,7 @@ export class QdrantManager {
     contentType: ContentType,
     sourcePath: string
   ): Promise<number> {
+    this.initialize();
     const collectionName = this.getCollectionName(projectId, contentType);
 
     // Get point IDs from PostgreSQL
@@ -300,6 +332,7 @@ export class QdrantManager {
    * Delete all embeddings for a project
    */
   async deleteProject(projectId: bigint): Promise<void> {
+    this.initialize();
     const contentTypes: ContentType[] = ['code', 'chat', 'documentation', 'error'];
 
     for (const contentType of contentTypes) {
@@ -334,6 +367,7 @@ export class QdrantManager {
       metadata?: Partial<EmbeddingMetadata>;
     }>
   ): Promise<string[]> {
+    this.initialize();
     const collectionName = this.getCollectionName(projectId, contentType);
     const pointIds: string[] = [];
 

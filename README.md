@@ -4,9 +4,10 @@ Cloud-based agentic development environment with AI-powered code generation, vir
 
 ## Features
 
-- 🤖 **AI-Powered Code Generation**: KiloCode integration with GPT-4 and RAG (Qdrant)
+- 🤖 **AI-Powered Code Generation**: Claude agentic system with tool use + OpenAI embeddings for RAG
 - 📁 **Virtual File System**: MongoDB GridFS - complete isolation per project
 - 🔐 **Multi-tenant Auth**: Clerk with organization support and RBAC
+- 🔒 **Secure Secret Management**: Encore secrets with encrypted user API keys (pgcrypto AES-256)
 - 🖥️ **Cloud IDE**: Monaco Editor with integrated terminal (xterm.js)
 - 🔄 **Git Integration**: Version control with visual rollback
 - 🚀 **Docker Deployments**: Dynamic subdomains with Traefik routing
@@ -30,24 +31,43 @@ cd /home/ssitzer/projects/vaporform
 ```
 
 This starts:
-- PostgreSQL (metadata storage)
 - MongoDB (GridFS file storage)
 - Qdrant (vector embeddings)
 - Redis (cache/sessions)
 
-### 3. Configure Environment
+Note: PostgreSQL is managed by Encore automatically.
 
-Edit `.env` and add your API keys:
+### 3. Configure Secrets
+
+**All secrets are managed via Encore** (no `.env` required).
+
+Run the interactive setup script:
 
 ```bash
-# Required
-OPENAI_API_KEY=sk-proj-...
-CLERK_SECRET_KEY=sk_test_...
-CLERK_WEBHOOK_SECRET=whsec_...
-
-# Optional
-DAYTONA_API_KEY=...
+./scripts/setup-local-secrets.sh
 ```
+
+Or manually set secrets:
+
+```bash
+# Required secrets
+encore secret set --type local ClerkSecretKey
+encore secret set --type local ClerkPublishableKey
+encore secret set --type local ClerkWebhookSecret
+encore secret set --type local AnthropicAPIKey
+encore secret set --type local OpenAIAPIKey
+encore secret set --type local MongoDBURI
+encore secret set --type local QdrantURL
+encore secret set --type local UserSecretEncryptionKey  # Generate with: openssl rand -base64 32
+
+# Optional secrets
+encore secret set --type local QdrantAPIKey            # If Qdrant auth enabled
+encore secret set --type local DaytonaAPIKey           # For workspace features
+encore secret set --type local DaytonaAPIURL           # Default: https://app.daytona.io/api
+encore secret set --type local BaseDomain              # Default: vaporform.dev
+```
+
+See [shared/secrets.ts](shared/secrets.ts) for complete documentation.
 
 ### 4. Start Backend
 
@@ -96,7 +116,7 @@ Access at: http://localhost:3000
 | VFS | GridFS virtual file system | 4000 | 11 |
 | Git | Version control operations | 4000 | 8 |
 | Vector | Qdrant embeddings & RAG | 4000 | 6 |
-| AI | KiloCode chat with streaming | 4000 | 8 |
+| AI | Claude agentic code generation + terminal agent | 4000 | 6 |
 | Workspace | Daytona build integration | 4000 | 7 |
 | Infra | Docker deployments | 4000 | 9 |
 | Billing | Usage tracking & quotas | 4000 | 8 |
@@ -148,11 +168,11 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for complete production setup with:
 
 ## Tech Stack
 
-**Backend**: Encore.ts, PostgreSQL, MongoDB, Qdrant, Redis, OpenAI, Clerk, Dockerode
+**Backend**: Encore.ts, PostgreSQL, MongoDB GridFS, Qdrant, Redis, Anthropic Claude, OpenAI (embeddings), Clerk, Dockerode
 
 **Frontend**: Next.js 15, Monaco Editor, xterm.js, Tailwind CSS, React Query
 
-**Infrastructure**: Docker, Traefik, Let's Encrypt
+**Infrastructure**: Docker, Traefik, Let's Encrypt, Daytona
 
 ## License
 

@@ -385,9 +385,9 @@ export const getGitHubConnection = api(
 
     await ensureProjectPermission(userId, projectId, 'view');
 
-    const { db } = await import('../shared/db.js');
+    const { db } = await import('../projects/db.js');
 
-    const result = await db.query<{
+    const row = await db.queryRow<{
       github_pat: string | null;
       github_repo_full_name: string | null;
       github_default_branch: string | null;
@@ -396,8 +396,6 @@ export const getGitHubConnection = api(
       FROM projects
       WHERE id = ${projectId}
     `;
-
-    const row = await result.next();
 
     if (!row || !row.github_pat) {
       return { connected: false };
@@ -440,7 +438,7 @@ export const connectGitHub = api(
       throw toAPIError(new ValidationError('Invalid GitHub Personal Access Token'));
     }
 
-    const { db } = await import('../shared/db.js');
+    const { db } = await import('../projects/db.js');
 
     await db.query`
       UPDATE projects
@@ -514,7 +512,7 @@ export const createGitHubRepo = api(
     });
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json() as any; // Type unknown from JSON response
       throw toAPIError(
         new ValidationError(error.message || 'Failed to create GitHub repository')
       );
@@ -556,7 +554,7 @@ export const pushToGitHub = api(
       await git.push('origin', req.branch || 'main');
 
       // Update project with GitHub repo info
-      const { db } = await import('../shared/db.js');
+      const { db } = await import('../projects/db.js');
       await db.query`
         UPDATE projects
         SET
@@ -564,6 +562,135 @@ export const pushToGitHub = api(
           github_default_branch = ${req.branch || 'main'}
         WHERE id = ${projectId}
       `;
+
+      return { success: true };
+    } finally {
+      git.cleanup();
+    }
+  }
+);
+
+/**
+ * Get branches for a GitHub repository
+ */
+interface GetGitHubBranchesRequest {
+  authorization: Header<'Authorization'>;
+  pat: string;
+  repoFullName: string;
+}
+
+interface GitHubBranch {
+  name: string;
+  commit: {
+    sha: string;
+    url: string;
+  };
+  protected: boolean;
+}
+
+interface GetGitHubBranchesResponse {
+  branches: GitHubBranch[];
+}
+
+export const getGitHubBranches = api(
+  { method: 'POST', path: '/git/github/branches' },
+  async (req: GetGitHubBranchesRequest): Promise<GetGitHubBranchesResponse> => {
+    await verifyClerkJWT(req.authorization);
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    if (!req.repoFullName || req.repoFullName.trim().length === 0) {
+      throw toAPIError(new ValidationError('Repository full name is required'));
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${req.repoFullName}/branches`,
+      {
+        headers: {
+          Authorization: `Bearer ${req.pat}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw toAPIError(new ValidationError('Repository not found'));
+      }
+      throw toAPIError(new ValidationError('Failed to fetch branches'));
+    }
+
+    const branches = (await response.json()) as GitHubBranch[];
+
+    return { branches };
+  }
+);
+
+/**
+ * Import a GitHub repository into a project
+ */
+interface ImportGitHubRepoRequest {
+  authorization: Header<'Authorization'>;
+  projectId: string;
+  pat: string;
+  repoFullName: string;
+  branch: string;
+}
+
+export const importGitHubRepo = api(
+  { method: 'POST', path: '/git/github/import' },
+  async (req: ImportGitHubRepoRequest): Promise<{ success: boolean }> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const projectId = BigInt(req.projectId);
+
+    await ensureProjectPermission(userId, projectId, 'edit');
+
+    if (!req.pat || req.pat.trim().length === 0) {
+      throw toAPIError(new ValidationError('GitHub Personal Access Token is required'));
+    }
+
+    if (!req.repoFullName || req.repoFullName.trim().length === 0) {
+      throw toAPIError(new ValidationError('Repository full name is required'));
+    }
+
+    if (!req.branch || req.branch.trim().length === 0) {
+      throw toAPIError(new ValidationError('Branch name is required'));
+    }
+
+    const git = createGitManager(projectId);
+
+    try {
+      // Clone the repository with the specified branch
+      const repoUrl = `https://github.com/${req.repoFullName}.git`;
+      await git.cloneRepository(repoUrl, req.pat, req.branch);
+
+      // Sync files from working directory to VFS
+      await git.syncToVFS(projectId);
+
+      // Initialize git tracking in database
+      await git.initFromExisting(projectId, req.branch);
+
+      // Update project with import metadata
+      const { db } = await import('../projects/db.js');
+      await db.query`
+        UPDATE projects
+        SET
+          github_imported_from = ${repoUrl},
+          github_imported_branch = ${req.branch},
+          github_import_date = NOW(),
+          github_pat = ${req.pat},
+          github_repo_full_name = ${req.repoFullName},
+          github_default_branch = ${req.branch},
+          git_initialized = true
+        WHERE id = ${projectId}
+      `;
+
+      console.log(
+        `✓ Imported GitHub repository ${req.repoFullName} (${req.branch}) to project ${projectId}`
+      );
 
       return { success: true };
     } finally {

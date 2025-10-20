@@ -5,12 +5,16 @@
 
 import { MongoClient, GridFSBucket, ObjectId } from 'mongodb';
 import { Readable } from 'stream';
+import { secret } from 'encore.dev/config';
 import { SQLDatabase } from 'encore.dev/storage/sqldb';
 import type { FileMetadata } from '../shared/types.js';
 import { ValidationError, NotFoundError } from '../shared/errors.js';
 import { normalizePath, getParentPath, getFilename } from '../shared/utils.js';
 
-const db = new SQLDatabase('vfs', {
+// Define MongoDB connection secret
+const mongoDBURI = secret("MongoDBURI");
+
+export const db = new SQLDatabase('vfs', {
   migrations: './migrations',
 });
 
@@ -24,10 +28,7 @@ export class GridFS {
   async connect(): Promise<void> {
     if (this.client) return;
 
-    const uri = process.env.MONGODB_URI || 'mongodb://vaporform:vaporform_dev_password@localhost:27017/vaporform?authSource=admin';
-    if (!process.env.MONGODB_URI) {
-      console.warn('[VFS Service] MONGODB_URI not set, using default local connection');
-    }
+    const uri = mongoDBURI();
 
     this.client = new MongoClient(uri);
     await this.client.connect();

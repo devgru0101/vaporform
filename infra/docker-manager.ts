@@ -8,6 +8,7 @@ import { SQLDatabase } from 'encore.dev/storage/sqldb';
 import { gridfs } from '../vfs/gridfs.js';
 import { generateSubdomain } from '../shared/utils.js';
 import { ValidationError, NotFoundError } from '../shared/errors.js';
+// @ts-ignore - tar-stream doesn't have TypeScript declarations
 import * as tar from 'tar-stream';
 import { Readable } from 'stream';
 
@@ -54,8 +55,8 @@ export class DockerManager {
     projectId: bigint,
     environment?: Record<string, string>
   ): Promise<Deployment> {
-    // Generate unique subdomain
-    const subdomain = generateSubdomain();
+    // Generate unique subdomain from project ID
+    const subdomain = generateSubdomain(`project-${projectId}`);
 
     // Create deployment record
     const deployment = await db.queryRow<Deployment>`

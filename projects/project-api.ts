@@ -29,6 +29,11 @@ interface CreateProjectRequest {
   orgId?: string;
   wizardData?: any;
   generateCode?: boolean;
+  // GitHub import fields
+  importFromGitHub?: boolean;
+  githubPat?: string;
+  githubRepoFullName?: string;
+  githubBranch?: string;
 }
 
 interface UpdateProjectRequest {
@@ -110,33 +115,111 @@ export const createProject = api(
 
       console.log(`✓ Created project: ${req.name} (ID: ${project.id})`);
 
-      // Automatically create Daytona workspace for the project
-      try {
-        const { daytonaManager } = await import('../workspace/daytona-manager.js');
-        const workspaceName = `${req.name} Workspace`;
-        const template = req.template || req.wizardData?.framework || 'typescript';
+      // If GitHub import is requested, import the repository
+      // Workspace will be created AFTER import with detected language
+      if (req.importFromGitHub && req.githubPat && req.githubRepoFullName && req.githubBranch) {
+        try {
+          const { importGitHubRepo } = await import('../git/git-api.js');
+          await importGitHubRepo({
+            authorization: req.authorization,
+            projectId: project.id.toString(),
+            pat: req.githubPat,
+            repoFullName: req.githubRepoFullName,
+            branch: req.githubBranch,
+          });
+          console.log(`✓ Imported GitHub repository for project: ${req.name}`);
 
-        await daytonaManager.createWorkspace(project.id, workspaceName, {
-          language: template,
-          environment: {
-            PROJECT_ID: project.id.toString(),
-            PROJECT_NAME: req.name,
-          },
-          autoStopInterval: 60, // Auto-stop after 1 hour
-          autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
-          ephemeral: false,
-        });
-        console.log(`✓ Created Daytona workspace for project: ${req.name}`);
-      } catch (error) {
-        console.error(`Failed to create workspace for project ${project.id}:`, error);
-        // Continue even if workspace creation fails
+          // Create workspace AFTER import with detected language
+          try {
+            const { daytonaManager } = await import('../workspace/daytona-manager.js');
+            const { gridfs } = await import('../vfs/gridfs.js');
+            const workspaceName = `${req.name} Workspace`;
+
+            // Detect language from imported files
+            let detectedLanguage = 'typescript'; // Default
+            try {
+              // Check for package.json (Node.js/TypeScript)
+              const packageJsonBuffer = await gridfs.readFile(project.id, '/package.json');
+              if (packageJsonBuffer) {
+                detectedLanguage = 'typescript';
+                console.log(`[GitHub Import] Detected Node.js/TypeScript project`);
+              }
+            } catch {
+              // Check for requirements.txt (Python)
+              try {
+                const reqBuffer = await gridfs.readFile(project.id, '/requirements.txt');
+                if (reqBuffer) {
+                  detectedLanguage = 'python';
+                  console.log(`[GitHub Import] Detected Python project`);
+                }
+              } catch {
+                // Default to typescript
+                console.log(`[GitHub Import] Could not detect language, defaulting to TypeScript`);
+              }
+            }
+
+            const workspace = await daytonaManager.createWorkspace(project.id, workspaceName, {
+              language: detectedLanguage,
+              environment: {
+                PROJECT_ID: project.id.toString(),
+                PROJECT_NAME: req.name,
+              },
+              autoStopInterval: 60, // Auto-stop after 1 hour
+              autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
+              ephemeral: false,
+            });
+            console.log(`✓ Created Daytona workspace for project: ${req.name} with language: ${detectedLanguage}`);
+
+            // Automatically setup the imported project (deploy files, install deps, start dev server)
+            // Run in background to not block project creation response
+            daytonaManager.setupImportedProject(workspace.id, project.id).then(setupResult => {
+              if (setupResult.success) {
+                console.log(`✓ Project ${project.id} setup completed. Dev server running: ${setupResult.devServerStarted}`);
+              } else {
+                console.error(`⚠ Project ${project.id} setup completed with errors:`, setupResult.errors);
+              }
+            }).catch(setupError => {
+              console.error(`✗ Failed to setup project ${project.id}:`, setupError);
+            });
+          } catch (error) {
+            console.error(`Failed to create workspace for project ${project.id}:`, error);
+            // Continue even if workspace creation fails
+          }
+        } catch (error) {
+          console.error(`Failed to import GitHub repository for project ${project.id}:`, error);
+          // Don't fail project creation, but log the error
+        }
       }
+      // For non-GitHub imports, handle workspace creation and code generation
+      else {
+        // Create workspace immediately for non-GitHub projects
+        try {
+          const { daytonaManager } = await import('../workspace/daytona-manager.js');
+          const workspaceName = `${req.name} Workspace`;
+          const template = req.template || req.wizardData?.framework || 'typescript';
 
-      // If generateCode is true, start generation
-      if (req.generateCode && req.wizardData) {
-        const { startProjectGeneration } = await import('../ai/project-generator.js');
-        await startProjectGeneration(project.id, req.wizardData, userId);
-        console.log(`✓ Started code generation for project: ${req.name}`);
+          await daytonaManager.createWorkspace(project.id, workspaceName, {
+            language: template,
+            environment: {
+              PROJECT_ID: project.id.toString(),
+              PROJECT_NAME: req.name,
+            },
+            autoStopInterval: 60, // Auto-stop after 1 hour
+            autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
+            ephemeral: false,
+          });
+          console.log(`✓ Created Daytona workspace for project: ${req.name}`);
+        } catch (error) {
+          console.error(`Failed to create workspace for project ${project.id}:`, error);
+          // Continue even if workspace creation fails
+        }
+
+        // If generateCode is true, start generation
+        if (req.generateCode && req.wizardData) {
+          const { startProjectGeneration } = await import('../ai/project-generator.js');
+          await startProjectGeneration(project.id, req.wizardData, userId);
+          console.log(`✓ Started code generation for project: ${req.name}`);
+        }
       }
 
       return { project };
@@ -399,8 +482,7 @@ export const deleteProject = api(
       // 3. Delete files from MongoDB GridFS and PostgreSQL metadata
       try {
         const { gridfs } = await import('../vfs/gridfs.js');
-        const VFSDatabase = await import('../vfs/db.js');
-        const vfsDb = VFSDatabase.db;
+        const { db: vfsDb } = await import('../vfs/gridfs.js');
 
         console.log(`[Delete Project] Deleting files from GridFS...`);
 
@@ -441,8 +523,7 @@ export const deleteProject = api(
 
       // 4. Delete chat sessions and messages (CASCADE will handle messages)
       try {
-        const AIDatabase = await import('../ai/db.js');
-        const aiDb = AIDatabase.db;
+        const { db: aiDb } = await import('../ai/db.js');
 
         console.log(`[Delete Project] Deleting chat sessions and messages...`);
 
@@ -469,8 +550,7 @@ export const deleteProject = api(
 
       // 5. Delete workspace records and logs (CASCADE will handle logs)
       try {
-        const WorkspaceDatabase = await import('../workspace/db.js');
-        const workspaceDb = WorkspaceDatabase.db;
+        const { db: workspaceDb } = await import('../workspace/daytona-manager.js');
 
         console.log(`[Delete Project] Deleting workspace records...`);
 

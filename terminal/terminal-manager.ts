@@ -265,10 +265,10 @@ export class TerminalManager {
     });
 
     // Handle PTY completion in background
-    ptyHandle.wait().then((result) => {
+    ptyHandle.wait().then((result: any) => {
       console.log(`Daytona PTY exited with code ${result.exitCode} for session ${sessionId}`);
 
-      this.closeSession(sessionId).catch(err => {
+      this.closeSession(sessionId).catch((err: any) => {
         console.error(`Failed to close session ${sessionId}:`, err);
       });
 
@@ -279,7 +279,7 @@ export class TerminalManager {
         }));
         ws.close();
       }
-    }).catch(err => {
+    }).catch((err: any) => {
       console.error(`Daytona PTY error for session ${sessionId}:`, err);
     });
 
@@ -315,24 +315,33 @@ export class TerminalManager {
     const session = this.activeSessions.get(key);
 
     if (!session) {
-      throw new Error(`No active PTY for session ${sessionId}`);
+      console.warn(`Resize requested for inactive session ${sessionId}`);
+      return; // Silently ignore instead of throwing
     }
 
-    // Handle both local and Daytona PTY
-    if (session.isDaytona && session.daytonaPty) {
-      await session.daytonaPty.resize(cols, rows);
-    } else if (session.pty) {
-      session.pty.resize(cols, rows);
-    } else {
-      throw new Error(`No valid PTY instance for session ${sessionId}`);
-    }
+    try {
+      // Handle both local and Daytona PTY
+      if (session.isDaytona && session.daytonaPty) {
+        await session.daytonaPty.resize(cols, rows);
+        console.log(`✓ Resized Daytona PTY for session ${sessionId} to ${cols}x${rows}`);
+      } else if (session.pty) {
+        session.pty.resize(cols, rows);
+        console.log(`✓ Resized local PTY for session ${sessionId} to ${cols}x${rows}`);
+      } else {
+        console.warn(`No valid PTY instance for session ${sessionId}`);
+        return;
+      }
 
-    // Update session
-    await db.exec`
-      UPDATE terminal_sessions
-      SET cols = ${cols}, rows = ${rows}
-      WHERE id = ${sessionId}
-    `;
+      // Update session
+      await db.exec`
+        UPDATE terminal_sessions
+        SET cols = ${cols}, rows = ${rows}
+        WHERE id = ${sessionId}
+      `;
+    } catch (error) {
+      // Log but don't throw - PTY might not be ready yet
+      console.warn(`Resize failed for session ${sessionId}:`, error);
+    }
   }
 
   /**

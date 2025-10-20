@@ -4,10 +4,14 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { secret } from 'encore.dev/config';
 import { daytonaManager } from '../workspace/daytona-manager.js';
 import { db } from '../projects/db.js';
 import { buildProjectGenerationPrompt, type WizardData } from './prompt-templates.js';
 import { executeAgentTool, estimateProgress } from './tool-handlers.js';
+
+// Define Anthropic API key secret
+const anthropicAPIKey = secret("AnthropicAPIKey");
 
 interface GenerationJob {
   id: bigint;
@@ -91,42 +95,86 @@ async function runGeneration(
   let workspaceId: bigint | null = null;
 
   try {
-    // Phase 1: Create workspace
-    console.log(`[Generator] Creating Daytona workspace`);
-    await updateJobStatus(jobId, 'creating_workspace', 5, 'Creating development workspace');
+    // Phase 1: Check for existing workspace or create new one
+    let workspace = await daytonaManager.getProjectWorkspace(projectId);
 
-    const workspace = await daytonaManager.createWorkspace(
-      projectId,
-      `workspace-${projectId}`,
-      {
-        language: 'typescript',
-        image: 'node:20-alpine',
-        ephemeral: false,
-        autoStopInterval: 3600, // 1 hour
+    if (!workspace) {
+      console.log(`[Generator] Creating new Daytona workspace for project ${projectId}`);
+      await updateJobStatus(jobId, 'creating_workspace', 5, 'Creating development workspace');
+
+      workspace = await daytonaManager.createWorkspace(
+        projectId,
+        `workspace-${projectId}`,
+        {
+          language: 'typescript',
+          image: 'node:20-alpine',
+          ephemeral: false,
+          autoStopInterval: 3600, // 1 hour
+        }
+      );
+
+      workspaceCreated = true;
+      workspaceId = workspace.id;
+
+      // Update job with workspace ID
+      await db.exec`
+        UPDATE generation_jobs
+        SET workspace_id = ${workspace.id}
+        WHERE id = ${jobId}
+      `;
+
+      // Update project with workspace ID (sandbox ID will be set later when workspace starts)
+      // The workspace record stores the daytona_sandbox_id which gets populated asynchronously
+      console.log(`[Generator] Workspace record created, sandbox ID will be populated when workspace starts`);
+
+      console.log(`[Generator] ✓ Workspace ${workspace.id} created successfully`);
+    } else {
+      console.log(`[Generator] Using existing workspace ${workspace.id} for project ${projectId}`);
+      await updateJobStatus(jobId, 'generating', 10, 'Using existing workspace');
+      workspaceId = workspace.id;
+
+      // Update job with existing workspace ID
+      await db.exec`
+        UPDATE generation_jobs
+        SET workspace_id = ${workspace.id}
+        WHERE id = ${jobId}
+      `;
+    }
+
+    // ✅ Phase 1.5: Ensure workspace is fully running before AI generation starts
+    console.log(`[Generator] Ensuring workspace is ready for code generation...`);
+    await updateJobStatus(jobId, 'preparing_workspace', 8, 'Waiting for workspace to be ready');
+
+    const MAX_WAIT_SECONDS = 60;
+    const POLL_INTERVAL_MS = 2000; // Poll every 2 seconds
+    const maxAttempts = Math.floor((MAX_WAIT_SECONDS * 1000) / POLL_INTERVAL_MS);
+    let attempts = 0;
+    let workspaceReady = false;
+
+    while (attempts < maxAttempts && !workspaceReady) {
+      const currentWorkspace = await daytonaManager.getWorkspace(workspace.id);
+
+      if (currentWorkspace.status === 'running') {
+        console.log(`[Generator] ✓ Workspace is running and ready`);
+        workspaceReady = true;
+        break;
       }
-    );
 
-    workspaceCreated = true;
-    workspaceId = workspace.id;
+      if (currentWorkspace.status === 'error' || currentWorkspace.status === 'deleted') {
+        throw new Error(`Workspace failed to start: ${currentWorkspace.error_message || 'Unknown error'}`);
+      }
 
-    // Update job with workspace ID
-    await db.exec`
-      UPDATE generation_jobs
-      SET workspace_id = ${workspace.id}
-      WHERE id = ${jobId}
-    `;
+      attempts++;
+      console.log(`[Generator] Workspace status: ${currentWorkspace.status}, waiting... (${attempts}/${maxAttempts})`);
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
 
-    // Update project with workspace ID
-    await db.exec`
-      UPDATE projects
-      SET daytona_workspace_id = ${workspace.daytona_workspace_id}
-      WHERE id = ${projectId}
-    `;
-
-    console.log(`[Generator] ✓ Workspace ${workspace.id} created successfully`);
+    if (!workspaceReady) {
+      throw new Error(`Workspace did not reach 'running' status after ${MAX_WAIT_SECONDS} seconds`);
+    }
 
     // Phase 2: Generate project with AI
-    console.log(`[Generator] Starting AI-powered code generation`);
+    console.log(`[Generator] Starting AI-powered code generation (workspace ready)`);
     await updateJobStatus(jobId, 'generating', 10, 'Generating project code');
 
     await generateWithAI(jobId, projectId, workspace.id, wizardData, userId);
@@ -185,15 +233,17 @@ async function generateWithAI(
   wizardData: WizardData,
   userId: string
 ): Promise<void> {
-  // Get user's API key from user_secrets
+  // Get user's API key from user_secrets (encrypted)
   const { getUserAnthropicKey } = await import('../users/secrets.js');
-  const userApiKey = await getUserAnthropicKey(userId);
+  let apiKey = await getUserAnthropicKey(userId);
 
-  // Fall back to environment variable if user hasn't set their own key
-  const apiKey = userApiKey || process.env.ANTHROPIC_API_KEY;
+  // Fall back to system Encore secret if user hasn't set their own key
+  if (!apiKey) {
+    apiKey = anthropicAPIKey();
+  }
 
   if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not configured. Please add your API key in Settings > AI.');
+    throw new Error('ANTHROPIC_API_KEY not configured. Please add your API key in Settings > AI or configure the system secret.');
   }
 
   const anthropic = new Anthropic({ apiKey });
@@ -301,7 +351,7 @@ Work methodically through each phase of the project setup. Always use write_to_f
 
     // Handle tool uses
     const toolUses = response.content.filter(
-      (block): block is Anthropic.TextBlock & { type: 'tool_use' } => block.type === 'tool_use'
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
     );
 
     if (toolUses.length === 0) {

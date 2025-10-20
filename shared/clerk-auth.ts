@@ -1,20 +1,121 @@
 /**
  * Clerk authentication and verification utilities
+ *
+ * Uses Encore secrets for all Clerk credentials:
+ * - ClerkSecretKey: Backend authentication
+ * - ClerkPublishableKey: Frontend authentication
+ * - ClerkWebhookSecret: Webhook verification
  */
 
 import { Webhook } from 'svix';
 import { createClerkClient, verifyToken } from '@clerk/backend';
 import type { WebhookEvent } from '@clerk/backend';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { webcrypto } from 'node:crypto';
 
-// Initialize Clerk client
-const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! });
+// Polyfill crypto for jose in Node.js 18
+if (!globalThis.crypto) {
+  // @ts-ignore
+  globalThis.crypto = webcrypto;
+}
+
+/**
+ * IMPORTANT: Clerk secrets must be defined in each service that uses this module.
+ * The shared/clerk-auth.ts module cannot define secrets because it's not within a service directory.
+ *
+ * In your service, define these secrets:
+ * ```typescript
+ * import { secret } from 'encore.dev/config';
+ * const clerkSecretKey = secret("ClerkSecretKey");
+ * const clerkPublishableKey = secret("ClerkPublishableKey");
+ * const clerkWebhookSecret = secret("ClerkWebhookSecret");
+ * ```
+ *
+ * Then pass them to the functions in this module via the new exported functions.
+ */
+
+// Lazy initialization of Clerk client
+let clerkClient: ReturnType<typeof createClerkClient> | null = null;
+let cachedPublishableKey: string | null = null;
+let cachedWebhookSecret: string | null = null;
+
+/**
+ * Initialize Clerk authentication with secrets from calling service
+ * Must be called before using other functions in this module
+ */
+export function initializeClerk(secretKey: string, publishableKey: string, webhookSecret: string) {
+  if (!clerkClient) {
+    clerkClient = createClerkClient({ secretKey });
+    cachedPublishableKey = publishableKey;
+    cachedWebhookSecret = webhookSecret;
+  }
+}
+
+function getClerkClient() {
+  if (!clerkClient) {
+    throw new Error('Clerk not initialized. Call initializeClerk() first from your service.');
+  }
+  return clerkClient;
+}
+
+function getPublishableKey(): string {
+  if (!cachedPublishableKey) {
+    throw new Error('Clerk not initialized. Call initializeClerk() first from your service.');
+  }
+  return cachedPublishableKey;
+}
+
+function getWebhookSecret(): string {
+  if (!cachedWebhookSecret) {
+    throw new Error('Clerk not initialized. Call initializeClerk() first from your service.');
+  }
+  return cachedWebhookSecret;
+}
+
+/**
+ * Get Clerk instance JWKS URL
+ * Derives the JWKS URL from the publishable key
+ */
+function getClerkJWKSURL(): string {
+  const publishableKey = getPublishableKey();
+
+  // Extract instance from publishable key
+  // Format: pk_test_{instance} or pk_live_{instance}
+  // Instance pattern: {slug}.clerk.accounts.dev
+  const match = publishableKey.match(/pk_(test|live)_(.+)/);
+  if (!match) {
+    throw new Error('Invalid Clerk publishable key format');
+  }
+
+  // Decode the base64-encoded instance
+  try {
+    const encodedInstance = match[2];
+    const instance = Buffer.from(encodedInstance, 'base64').toString('utf-8');
+
+    // Remove trailing $ if present
+    const cleanInstance = instance.replace(/\$+$/, '');
+
+    return `https://${cleanInstance}/.well-known/jwks.json`;
+  } catch (error) {
+    // Fallback: assume the publishable key itself contains the instance
+    throw new Error('Could not derive JWKS URL from Clerk publishable key');
+  }
+}
+
+// Lazy initialization of JWKS
+let JWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
+function getJWKS() {
+  if (!JWKS) {
+    const jwksURL = getClerkJWKSURL();
+    JWKS = createRemoteJWKSet(new URL(jwksURL));
+  }
+  return JWKS;
+}
 
 /**
  * Verify Clerk JWT token from Authorization header
  *
- * Note: Clerk's verifyToken needs the publishable key to construct the JWKS URL.
- * The JWKS URL is: https://<frontend-api>/.well-known/jwks.json
- * The frontend-api is extracted from the publishable key or secret key.
+ * Uses Clerk's built-in verifyToken which handles JWKS fetching internally
  */
 export async function verifyClerkJWT(authHeader: string | undefined): Promise<{
   userId: string;
@@ -33,29 +134,38 @@ export async function verifyClerkJWT(authHeader: string | undefined): Promise<{
   const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
   try {
-    const secretKey = process.env.CLERK_SECRET_KEY!;
+    // Use jose library for JWT verification with Clerk JWKS
+    // This is more reliable than Clerk's verifyToken for Encore environments
+    const jwks = getJWKS();
 
-    // For Clerk test keys, derive the publishable key from the secret key
-    // Test keys: sk_test_xxx and pk_test_xxx both encode the instance identifier
-    let publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
-
-    if (!publishableKey && secretKey && secretKey.startsWith('sk_test_')) {
-      // For development, we can derive it or use the hardcoded one
-      publishableKey = 'pk_test_bGlrZWQtY2F0LTg0LmNsZXJrLmFjY291bnRzLmRldiQ';
+    // Get the issuer from the publishable key
+    const publishableKey = getPublishableKey();
+    const match = publishableKey.match(/pk_(test|live)_(.+)/);
+    if (!match) {
+      throw new Error('Invalid Clerk publishable key format');
     }
+    const encodedInstance = match[2];
+    const instance = Buffer.from(encodedInstance, 'base64').toString('utf-8');
+    const cleanInstance = instance.replace(/\$+$/, '');
+    const issuer = `https://${cleanInstance}`;
 
-    const session = await verifyToken(token, {
-      secretKey,
-      publishableKey,
+    console.log('[Clerk Auth] Verifying JWT with issuer:', issuer);
+    console.log('[Clerk Auth] Token preview:', token.substring(0, 50) + '...');
+
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: issuer,
     });
 
+    console.log('[Clerk Auth] JWT verified successfully for user:', payload.sub);
+
     return {
-      userId: session.sub,
-      sessionId: session.sid || '',
-      orgId: session.org_id as string | undefined,
-      orgRole: session.org_role as string | undefined,
+      userId: payload.sub || '',
+      sessionId: (payload.sid as string) || '',
+      orgId: (payload.org_id as string) || undefined,
+      orgRole: (payload.org_role as string) || undefined,
     };
   } catch (error) {
+    console.error('[Clerk Auth] JWT verification error details:', error);
     throw new Error(`JWT verification failed: ${error}`);
   }
 }
@@ -67,11 +177,7 @@ export function verifyClerkWebhook(
   payload: string,
   headers: Record<string, string | string[] | undefined>
 ): WebhookEvent {
-  const webhookSecret = process.env.CLERK_WEBHOOK_SECRET;
-
-  if (!webhookSecret) {
-    throw new Error('CLERK_WEBHOOK_SECRET is not set');
-  }
+  const webhookSecret = getWebhookSecret();
 
   const wh = new Webhook(webhookSecret);
 
@@ -106,10 +212,17 @@ export async function checkOrganizationPermission(
   requiredRole: 'org:owner' | 'org:admin' | 'org:developer' | 'org:viewer'
 ): Promise<boolean> {
   try {
-    const membership = await clerkClient.organizations.getOrganizationMembership({
+    const client = getClerkClient();
+    // Clerk API updated - getOrganizationMembership renamed to getOrganizationMembershipList
+    const membershipList = await client.organizations.getOrganizationMembershipList({
       organizationId: orgId,
-      userId: userId,
     });
+
+    // Find the user's membership
+    const membership = membershipList.data.find((m: any) => m.publicUserData.userId === userId);
+    if (!membership) {
+      return false;
+    }
 
     const roleHierarchy: Record<string, number> = {
       'org:owner': 4,
@@ -132,7 +245,8 @@ export async function checkOrganizationPermission(
  */
 export async function getUserSubscriptionTier(userId: string): Promise<string> {
   try {
-    const user = await clerkClient.users.getUser(userId);
+    const client = getClerkClient();
+    const user = await client.users.getUser(userId);
     return (user.publicMetadata?.subscriptionTier as string) || 'free';
   } catch (error) {
     return 'free';
@@ -144,7 +258,8 @@ export async function getUserSubscriptionTier(userId: string): Promise<string> {
  */
 export async function getOrgSubscriptionTier(orgId: string): Promise<string> {
   try {
-    const org = await clerkClient.organizations.getOrganization({
+    const client = getClerkClient();
+    const org = await client.organizations.getOrganization({
       organizationId: orgId,
     });
     return (org.publicMetadata?.subscriptionTier as string) || 'team';
