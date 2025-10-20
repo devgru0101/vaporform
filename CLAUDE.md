@@ -13,7 +13,7 @@ Vaporform is a cloud-based agentic development environment with AI-powered code 
 - **AI**: Anthropic Claude (claude-sonnet-4-5, claude-3-5-sonnet) for agentic code generation
 - **AI Embeddings**: OpenAI text-embedding-3-small for vector embeddings (RAG)
 - **Auth**: Clerk (multi-tenant with organizations and RBAC)
-- **Frontend**: Next.js 15 (separate repository at ../vaporform-frontend)
+- **Frontend**: Next.js 15 (monorepo at ./frontend)
 - **Infrastructure**: Docker, Traefik, Daytona workspaces
 
 ## Development Commands

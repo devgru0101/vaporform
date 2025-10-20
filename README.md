@@ -81,7 +81,7 @@ Dashboard: http://127.0.0.1:9400
 ### 5. Start Frontend
 
 ```bash
-cd ../vaporform-frontend
+cd frontend
 npm run dev
 ```
 
@@ -142,7 +142,7 @@ Access at: http://localhost:3000
 encore run
 
 # Run frontend (separate terminal)
-cd ../vaporform-frontend && npm run dev
+cd frontend && npm run dev
 
 # View logs
 docker compose logs -f
