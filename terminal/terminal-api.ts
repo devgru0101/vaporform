@@ -7,9 +7,7 @@ import { api, Header } from 'encore.dev/api';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { terminalManager } from './terminal-manager.js';
-import { WebSocketServer, WebSocket } from 'ws';
 import { ValidationError, toAPIError } from '../shared/errors.js';
-import { createServer } from 'http';
 
 interface CreateSessionRequest {
   authorization: Header<'Authorization'>;
@@ -160,92 +158,5 @@ export const getHistory = api(
  * In production, set up a WebSocket server on a different port
  */
 
-// Create WebSocket server (runs on port 4001)
-const wss = new WebSocketServer({ port: 4001 });
-
-wss.on('connection', async (ws: WebSocket, req) => {
-  console.log('WebSocket connection received');
-
-  // Extract session ID and auth token from URL query
-  const url = new URL(req.url || '', 'ws://localhost');
-  const sessionId = url.searchParams.get('sessionId');
-  const token = url.searchParams.get('token');
-
-  if (!sessionId || !token) {
-    ws.close(1008, 'Missing sessionId or token');
-    return;
-  }
-
-  try {
-    // Verify authentication
-    const { userId } = await verifyClerkJWT(`Bearer ${token}`);
-
-    // Get session and verify ownership
-    const session = await terminalManager.getSession(BigInt(sessionId));
-
-    if (session.user_id !== userId) {
-      ws.close(1008, 'Not authorized');
-      return;
-    }
-
-    // Start PTY
-    await terminalManager.startPTY(BigInt(sessionId), ws);
-
-    // Handle incoming messages
-    ws.on('message', async (data: Buffer) => {
-      try {
-        const message = JSON.parse(data.toString());
-
-        switch (message.type) {
-          case 'input':
-            terminalManager.writeInput(BigInt(sessionId), message.data);
-
-            // Check if it's a command (ends with newline)
-            if (message.data.includes('\r') || message.data.includes('\n')) {
-              // Extract command from recent input
-              // In production, maintain a buffer of recent input
-              const command = message.command || message.data.trim();
-              if (command) {
-                await terminalManager.saveCommand(BigInt(sessionId), command);
-              }
-            }
-            break;
-
-          case 'resize':
-            await terminalManager.resize(
-              BigInt(sessionId),
-              message.cols || 80,
-              message.rows || 24
-            );
-            break;
-
-          default:
-            console.warn(`Unknown message type: ${message.type}`);
-        }
-      } catch (error) {
-        console.error('Error handling WebSocket message:', error);
-      }
-    });
-
-    // Handle disconnection
-    ws.on('close', () => {
-      console.log(`WebSocket closed for session ${sessionId}`);
-      terminalManager.closeSession(BigInt(sessionId)).catch(err => {
-        console.error(`Error closing session ${sessionId}:`, err);
-      });
-    });
-
-    ws.on('error', (error) => {
-      console.error(`WebSocket error for session ${sessionId}:`, error);
-    });
-
-  } catch (error) {
-    console.error('Error setting up terminal session:', error);
-    ws.close(1011, 'Internal server error');
-  }
-});
-
-console.log('✓ WebSocket terminal server listening on port 4001');
-
-// Export for cleanup
-export { wss };
+// PTY-based terminal server removed - now using SSH-based terminals via workspace service
+// The SSH WebSocket proxy runs on port 4003 in workspace/workspace-api.ts

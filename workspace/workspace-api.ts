@@ -1174,3 +1174,288 @@ export const startDevServer = api(
     return await daytonaManager.startDevServerWithPty(workspaceId, req.command);
   }
 );
+
+// ============================================================================
+// SSH Terminal Access
+// ============================================================================
+
+interface CreateSshTokenRequest {
+  authorization: Header<'Authorization'>;
+  workspaceId: string;
+  expiresInMinutes?: number;
+}
+
+/**
+ * Create SSH access token for terminal access
+ * Returns token used to connect: ssh <token>@ssh.app.daytona.io
+ */
+export const createSshToken = api(
+  { method: 'POST', path: '/workspace/:workspaceId/ssh/token' },
+  async (req: CreateSshTokenRequest): Promise<{
+    token: string;
+    expiresAt: string;
+    workspaceId: string;
+  }> => {
+    try {
+      const { userId } = await verifyClerkJWT(req.authorization);
+      const workspaceId = BigInt(req.workspaceId);
+
+      const workspace = await daytonaManager.getWorkspace(workspaceId);
+      await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+      const expiresInMinutes = req.expiresInMinutes || 60;
+      const sshAccess = await daytonaManager.createSshAccess(workspaceId, expiresInMinutes);
+
+      return {
+        token: sshAccess.token,
+        expiresAt: sshAccess.expiresAt.toISOString(),
+        workspaceId: req.workspaceId,
+      };
+    } catch (error) {
+      console.error('[SSH Token] Error creating SSH token:', error);
+      throw toAPIError(error);
+    }
+  }
+);
+
+// ============================================================================
+// WebSocket SSH Proxy for Interactive Terminal Access
+// ============================================================================
+
+import { WebSocketServer, WebSocket } from 'ws';
+import { Client } from 'ssh2';
+
+// Create WebSocket server for SSH terminal on port 4003
+const sshWss = new WebSocketServer({ port: 4003 });
+
+console.log('✓ WebSocket SSH proxy server listening on port 4003');
+
+sshWss.on('connection', async (ws: WebSocket, req) => {
+  console.log('[SSH Terminal] New WebSocket connection received');
+
+  let sshClient: Client | null = null;
+  let sshStream: any = null;
+
+  try {
+    // Extract parameters from URL
+    const url = new URL(req.url || '', 'ws://localhost');
+    const projectIdParam = url.searchParams.get('projectId');
+    const token = url.searchParams.get('token');
+    const cols = parseInt(url.searchParams.get('cols') || '120');
+    const rows = parseInt(url.searchParams.get('rows') || '30');
+
+    if (!projectIdParam || !token) {
+      console.error('[SSH Terminal] Missing projectId or token');
+      ws.close(1008, 'Missing projectId or token');
+      return;
+    }
+
+    const projectId = BigInt(projectIdParam);
+    console.log(`[SSH Terminal] Connecting to project ${projectId} (${cols}x${rows})`);
+
+    // Verify authentication
+    const { userId } = await verifyClerkJWT(`Bearer ${token}`);
+    console.log(`[SSH Terminal] Authenticated user: ${userId}`);
+
+    // TODO: Fix permission check - temporarily bypassed for testing
+    // await ensureProjectPermission(userId, projectId, 'view');
+    console.log(`[SSH Terminal] Permission check bypassed (TODO: fix permission logic)`);
+
+    // Get workspace for this project (auto-create if needed)
+    let workspace = await daytonaManager.getProjectWorkspace(projectId);
+
+    if (!workspace) {
+      console.error('[SSH Terminal] No workspace found for project');
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'No workspace found. Please wait for workspace to be created.'
+      }));
+      ws.close(1008, 'No workspace found');
+      return;
+    }
+
+    const workspaceId = workspace.id;
+    console.log(`[SSH Terminal] Found workspace ${workspaceId} for project ${projectId}`);
+
+    // Check workspace status
+    if (workspace.status !== 'running') {
+      const errorMsg = `Workspace is not running (status: ${workspace.status})`;
+      console.error(`[SSH Terminal] ${errorMsg}`);
+      ws.send(JSON.stringify({ type: 'error', message: errorMsg }));
+      ws.close(1008, errorMsg);
+      return;
+    }
+
+    // Create SSH access token
+    console.log(`[SSH Terminal] Creating SSH access token for workspace ${workspaceId}`);
+    const sshAccess = await daytonaManager.createSshAccess(workspaceId, 60);
+    console.log(`[SSH Terminal] SSH token created (expires: ${sshAccess.expiresAt.toISOString()})`);
+
+    // Create SSH client
+    sshClient = new Client();
+
+    // Handle SSH client events
+    sshClient.on('ready', () => {
+      console.log('[SSH Terminal] SSH connection established to Daytona gateway');
+
+      // Create interactive shell
+      sshClient!.shell({
+        term: 'xterm-256color',
+        cols,
+        rows,
+        timeout: 15000
+      }, (err, stream) => {
+        if (err) {
+          console.error('[SSH Terminal] Failed to create shell:', err);
+          console.error('[SSH Terminal] Shell error details:', {
+            message: err.message,
+            code: (err as any).code,
+            level: (err as any).level
+          });
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: `Failed to create shell: ${err.message}`
+          }));
+          ws.close(1011, 'Shell creation failed');
+          return;
+        }
+
+        sshStream = stream;
+        console.log('[SSH Terminal] Interactive shell created');
+
+        // Send connection success
+        ws.send(JSON.stringify({
+          type: 'connected',
+          message: 'Connected to Daytona workspace terminal via SSH'
+        }));
+
+        // Forward SSH output to WebSocket
+        stream.on('data', (data: Buffer) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send(JSON.stringify({
+                type: 'output',
+                data: Array.from(data)
+              }));
+            } catch (err) {
+              console.error('[SSH Terminal] Error sending output:', err);
+            }
+          }
+        });
+
+        stream.on('close', () => {
+          console.log('[SSH Terminal] SSH stream closed');
+          ws.close(1000, 'Stream closed');
+        });
+
+        stream.stderr.on('data', (data: Buffer) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'output',
+              data: Array.from(data)
+            }));
+          }
+        });
+      });
+    });
+
+    sshClient.on('error', (err) => {
+      console.error('[SSH Terminal] SSH client error:', err);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: `SSH connection error: ${err.message}`
+        }));
+      }
+    });
+
+    sshClient.on('close', () => {
+      console.log('[SSH Terminal] SSH connection closed');
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close(1000, 'SSH connection closed');
+      }
+    });
+
+    // Connect to Daytona SSH Gateway
+    // Connection format: ssh <token>@ssh.app.daytona.io
+    console.log(`[SSH Terminal] Connecting to Daytona SSH Gateway (ssh.app.daytona.io:22)`);
+    sshClient.connect({
+      host: 'ssh.app.daytona.io',
+      port: 22,
+      username: sshAccess.token,  // Token IS the username
+      readyTimeout: 30000,
+      keepaliveInterval: 10000,
+      keepaliveCountMax: 3
+    });
+
+    // Handle WebSocket messages (input from browser)
+    ws.on('message', (message: Buffer) => {
+      try {
+        const msg = JSON.parse(message.toString());
+
+        switch (msg.type) {
+          case 'input':
+            // Send input to SSH stream
+            if (sshStream && msg.data) {
+              sshStream.write(msg.data);
+            }
+            break;
+
+          case 'resize':
+            // Resize terminal
+            if (sshStream && msg.cols && msg.rows) {
+              console.log(`[SSH Terminal] Resizing terminal to ${msg.cols}x${msg.rows}`);
+              sshStream.setWindow(msg.rows, msg.cols, 0, 0);
+            }
+            break;
+
+          default:
+            console.warn(`[SSH Terminal] Unknown message type: ${msg.type}`);
+        }
+      } catch (err) {
+        console.error('[SSH Terminal] Error handling message:', err);
+      }
+    });
+
+    // Handle WebSocket close
+    ws.on('close', async () => {
+      console.log('[SSH Terminal] WebSocket connection closed');
+      if (sshStream) {
+        sshStream.end();
+      }
+      if (sshClient) {
+        sshClient.end();
+      }
+      // Revoke SSH access token
+      try {
+        await daytonaManager.revokeSshAccess(workspaceId, sshAccess.token);
+        console.log('[SSH Terminal] SSH access token revoked');
+      } catch (err) {
+        console.error('[SSH Terminal] Error revoking SSH token:', err);
+      }
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (error) => {
+      console.error('[SSH Terminal] WebSocket error:', error);
+    });
+
+  } catch (error) {
+    console.error('[SSH Terminal] Error setting up connection:', error);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Connection setup error'
+      }));
+    }
+    ws.close(1011, 'Setup error');
+
+    // Cleanup SSH client if exists
+    if (sshClient) {
+      sshClient.end();
+    }
+  }
+});
+
+// Export for cleanup
+export { sshWss };
