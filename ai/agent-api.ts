@@ -146,6 +146,138 @@ const AGENT_TOOLS: any[] = [
       },
     },
   },
+  {
+    name: 'run_code',
+    description: 'Execute code in the sandbox runtime. Supports Python, TypeScript, and JavaScript. Returns stdout, stderr, exit code, and matplotlib chart artifacts. Use for testing/validating code before deployment.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description: 'The code to execute',
+        },
+        language: {
+          type: 'string',
+          enum: ['python', 'typescript', 'javascript'],
+          description: 'Programming language to use',
+        },
+        timeout: {
+          type: 'number',
+          description: 'Timeout in seconds (default: 30)',
+          default: 30,
+        },
+      },
+      required: ['code', 'language'],
+    },
+  },
+  {
+    name: 'edit_file',
+    description: 'Make a targeted edit to a file by replacing old_text with new_text. More efficient than write_to_file for small changes. The old_text must match exactly.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'The relative path to the file to edit',
+        },
+        old_text: {
+          type: 'string',
+          description: 'The exact text to find and replace (must match exactly including whitespace)',
+        },
+        new_text: {
+          type: 'string',
+          description: 'The new text to replace with',
+        },
+      },
+      required: ['path', 'old_text', 'new_text'],
+    },
+  },
+  {
+    name: 'git_status',
+    description: 'Get the current git status showing modified, added, and deleted files.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'git_commit',
+    description: 'Commit all staged changes with a message. Automatically stages all modified files before committing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message: {
+          type: 'string',
+          description: 'The commit message',
+        },
+      },
+      required: ['message'],
+    },
+  },
+  {
+    name: 'git_log',
+    description: 'Get the commit history for the project.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of commits to return (default: 10)',
+          default: 10,
+        },
+      },
+    },
+  },
+  {
+    name: 'git_diff',
+    description: 'Show the diff of uncommitted changes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Optional: Show diff for specific file',
+        },
+      },
+    },
+  },
+  {
+    name: 'install_package',
+    description: 'Install a package using the project\'s package manager (npm, yarn, pnpm). Detects package manager automatically.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        package: {
+          type: 'string',
+          description: 'Package name to install (e.g., "react", "express", "@types/node")',
+        },
+        dev: {
+          type: 'boolean',
+          description: 'Install as dev dependency',
+          default: false,
+        },
+        version: {
+          type: 'string',
+          description: 'Specific version to install (e.g., "^18.0.0")',
+        },
+      },
+      required: ['package'],
+    },
+  },
+  {
+    name: 'remove_package',
+    description: 'Remove a package using the project\'s package manager.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        package: {
+          type: 'string',
+          description: 'Package name to remove',
+        },
+      },
+      required: ['package'],
+    },
+  },
 ];
 
 // Daytona MCP Tools for sandbox interaction

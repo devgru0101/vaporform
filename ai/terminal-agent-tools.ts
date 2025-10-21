@@ -231,6 +231,38 @@ class TerminalAgentTools {
             }
           }
         }
+      },
+      {
+        name: 'run_code',
+        description: 'Execute code in the workspace runtime. Supports Python, TypeScript, and JavaScript. Returns stdout, stderr, exit code, and matplotlib chart artifacts. Use for testing code snippets.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            code: {
+              type: 'string',
+              description: 'Code to execute'
+            },
+            language: {
+              type: 'string',
+              enum: ['python', 'typescript', 'javascript'],
+              description: 'Programming language'
+            },
+            timeout: {
+              type: 'number',
+              description: 'Timeout in seconds (default: 30)',
+              default: 30
+            }
+          },
+          required: ['code', 'language']
+        }
+      },
+      {
+        name: 'list_pty_sessions',
+        description: 'List all active PTY (terminal) sessions in the workspace. Shows session IDs, active status, working directory, and terminal dimensions.',
+        input_schema: {
+          type: 'object',
+          properties: {}
+        }
       }
     ];
   }
@@ -268,6 +300,10 @@ class TerminalAgentTools {
         return await this.handleCheckProcess(input, context);
       case 'get_preview_url':
         return await this.handleGetPreviewUrl(input, context);
+      case 'run_code':
+        return await this.handleCodeRun(input, context);
+      case 'list_pty_sessions':
+        return await this.handleListPtySessions(input, context);
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }
@@ -830,6 +866,89 @@ class TerminalAgentTools {
       url,
       message: 'Preview URL detected automatically'
     };
+  }
+
+  /**
+   * Execute code in workspace runtime
+   * NEW: Complete Daytona Process API coverage
+   */
+  private async handleCodeRun(
+    input: { code: string; language: string; timeout?: number },
+    context: ToolContext
+  ): Promise<any> {
+    if (!context.workspaceId) {
+      throw new Error('No workspace configured. Cannot execute code.');
+    }
+
+    const { daytonaManager } = await import('../workspace/daytona-manager.js');
+
+    try {
+      const result = await daytonaManager.codeRun(
+        context.workspaceId,
+        input.code,
+        undefined,
+        input.timeout || 30
+      );
+
+      return {
+        success: result.exitCode === 0,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        charts: result.artifacts?.charts || [],
+        language: input.language
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        success: false,
+        exitCode: 1,
+        stdout: '',
+        stderr: errorMsg,
+        error: errorMsg,
+        language: input.language
+      };
+    }
+  }
+
+  /**
+   * List all PTY sessions
+   * NEW: Complete Daytona Process API coverage
+   */
+  private async handleListPtySessions(
+    input: any,
+    context: ToolContext
+  ): Promise<any> {
+    if (!context.workspaceId) {
+      throw new Error('No workspace configured. Cannot list PTY sessions.');
+    }
+
+    const { daytonaManager } = await import('../workspace/daytona-manager.js');
+
+    try {
+      const sessions = await daytonaManager.listDaytonaPtySessions(context.workspaceId);
+
+      return {
+        success: true,
+        sessions: sessions.map((s: any) => ({
+          id: s.id,
+          active: s.active,
+          cwd: s.cwd,
+          cols: s.cols,
+          rows: s.rows,
+          createdAt: s.createdAt
+        })),
+        total: sessions.length
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        success: false,
+        sessions: [],
+        total: 0,
+        error: errorMsg
+      };
+    }
   }
 }
 

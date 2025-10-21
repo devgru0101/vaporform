@@ -120,3 +120,79 @@ body {
 ::-webkit-scrollbar-corner {
   background: var(--vf-bg-primary);
 }
+
+/* ============================================================================
+ * Resizable Panel System (react-resizable-panels)
+ * ============================================================================ */
+
+/* Panel container */
+[data-panel-group] {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+/* Individual panels */
+[data-panel] {
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* Resize handle */
+[data-panel-resize-handle] {
+  position: relative;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background-color var(--vf-transition-fast);
+}
+
+/* Vertical resize handle (between horizontal panels) */
+[data-panel-resize-handle][data-resize-handle-state="inactive"][data-panel-group-direction="horizontal"] {
+  width: 4px;
+  cursor: col-resize;
+  background: var(--vf-border-primary);
+}
+
+[data-panel-resize-handle][data-resize-handle-state="hover"][data-panel-group-direction="horizontal"],
+[data-panel-resize-handle][data-resize-handle-state="drag"][data-panel-group-direction="horizontal"] {
+  width: 4px;
+  background: var(--vf-accent-primary);
+}
+
+/* Horizontal resize handle (between vertical panels) */
+[data-panel-resize-handle][data-resize-handle-state="inactive"][data-panel-group-direction="vertical"] {
+  height: 4px;
+  cursor: row-resize;
+  background: var(--vf-border-primary);
+}
+
+[data-panel-resize-handle][data-resize-handle-state="hover"][data-panel-group-direction="vertical"],
+[data-panel-resize-handle][data-resize-handle-state="drag"][data-panel-group-direction="vertical"] {
+  height: 4px;
+  background: var(--vf-accent-primary);
+}
+
+/* Visual indicator on hover/drag */
+[data-panel-resize-handle][data-resize-handle-state="hover"]::before,
+[data-panel-resize-handle][data-resize-handle-state="drag"]::before {
+  content: '';
+  position: absolute;
+  background: var(--vf-accent-primary);
+  opacity: 0.3;
+}
+
+/* Horizontal handle indicator */
+[data-panel-resize-handle][data-panel-group-direction="horizontal"]::before {
+  top: 0;
+  bottom: 0;
+  left: -2px;
+  right: -2px;
+}
+
+/* Vertical handle indicator */
+[data-panel-resize-handle][data-panel-group-direction="vertical"]::before {
+  left: 0;
+  right: 0;
+  top: -2px;
+  bottom: -2px;
+}

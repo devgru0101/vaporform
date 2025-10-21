@@ -173,6 +173,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-width: 100%;  /* Respect parent width */
+  min-width: 0;     /* Allow flex shrinking */
 }
 
 .agent-message-text {
@@ -181,6 +183,8 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: break-word;  /* Break long URLs/tokens */
+  max-width: 100%;
 }
 
 /* Markdown-style formatting */

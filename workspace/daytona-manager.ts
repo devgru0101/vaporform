@@ -198,14 +198,15 @@ export class DaytonaManager {
     }
 
     console.log(`[DAYTONA DEBUG] Created workspace record in DB with ID: ${workspace.id}`);
-    console.log(`[DAYTONA DEBUG] Calling startWorkspace in background for workspace ${workspace.id}`);
+    console.log(`[DAYTONA DEBUG] Starting workspace synchronously (awaiting completion)`);
 
-    // Start workspace creation in background
-    this.startWorkspace(workspace.id, options).catch(err => {
-      console.error(`[DAYTONA DEBUG] ✗ Failed to start workspace ${workspace.id}:`, err);
-    });
+    // ⚠️ CRITICAL FIX: AWAIT workspace creation to ensure it's ready before returning
+    // This prevents project generation from timing out while waiting for workspace to be 'running'
+    // Previous behavior: Fire-and-forget background creation → silent failures → timeouts
+    // New behavior: Wait for workspace to be fully running → errors propagate correctly
+    await this.startWorkspace(workspace.id, options);
 
-    console.log(`✓ Created workspace ${workspace.id} for project ${projectId}`);
+    console.log(`✓ Workspace ${workspace.id} for project ${projectId} is ready`);
 
     return workspace;
   }
@@ -721,12 +722,28 @@ export class DaytonaManager {
 
         await this.addLog(workspaceId, 'info', `Executed command: ${command}`);
 
-        // SDK type mismatch - ExecuteResponse may have different structure
+        // ExecuteResponse structure per Daytona SDK docs:
+        // - exitCode: number (main exit code)
+        // - result: string (primary output)
+        // - artifacts?: { stdout: string, charts?: Chart[] }
         const response = result as any;
+
+        // CRITICAL: Properly extract stdout, stderr, and errors from ExecuteResponse
+        // Daytona may put errors in stderr OR in result field if exitCode != 0
+        const stdout = response.artifacts?.stdout || response.stdout || response.result || '';
+        const stderr = response.stderr || (response.exitCode !== 0 ? response.result : '') || '';
+        const exitCode = response.exitCode || response.code || 0;
+
+        // Log error details for debugging
+        if (exitCode !== 0) {
+          console.error(`[DAYTONA] Command failed (exit ${exitCode}):`, command);
+          console.error(`[DAYTONA] stderr:`, stderr);
+        }
+
         return {
-          stdout: response.stdout || response.output || '',
-          stderr: response.stderr || response.error || '',
-          exitCode: response.exitCode || response.code || 0,
+          stdout,
+          stderr,
+          exitCode,
         };
       } else {
         // Development mode
@@ -2530,6 +2547,369 @@ export class DaytonaManager {
         success: false,
         message: `Failed to start dev server: ${errorMsg}`,
       };
+    }
+  }
+
+  // ============================================================================
+  // NEW: Complete Daytona Process API Coverage (100%)
+  // ============================================================================
+
+  /**
+   * Execute code in the sandbox runtime
+   * Supports Python, TypeScript, JavaScript with matplotlib chart support
+   * Official Daytona API: process.codeRun(code, params?, timeout?)
+   */
+  async codeRun(
+    workspaceId: bigint,
+    code: string,
+    params?: { argv?: string[]; env?: Record<string, string> },
+    timeout?: number
+  ): Promise<{ exitCode: number; stdout: string; stderr: string; artifacts?: any }> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (workspace.status !== 'running') {
+      throw new ValidationError('Workspace is not running');
+    }
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+
+        console.log(`[DAYTONA] Executing code (${code.length} bytes, timeout: ${timeout || 30}s)`);
+        const result = await sandbox.process.codeRun(code, params, timeout);
+
+        await this.addLog(workspaceId, 'info', `Executed code: exit=${result.exitCode}`);
+
+        // ExecuteResponse structure per Daytona SDK docs:
+        // - exitCode: number (main exit code)
+        // - result: string (primary output)
+        // - artifacts?: { stdout: string, charts?: Chart[] }
+        const response = result as any;
+
+        // CRITICAL: Properly extract stdout, stderr, and errors from ExecuteResponse
+        const exitCode = response.exitCode || response.code || 0;
+        const stdout = response.artifacts?.stdout || response.stdout || response.result || '';
+        const stderr = response.stderr || (exitCode !== 0 ? response.result : '') || '';
+
+        // Log error details for debugging
+        if (exitCode !== 0) {
+          console.error(`[DAYTONA] Code execution failed (exit ${exitCode})`);
+          console.error(`[DAYTONA] stderr:`, stderr);
+        }
+
+        return {
+          exitCode,
+          stdout,
+          stderr,
+          artifacts: response.artifacts,
+        };
+      } else {
+        // Development mode
+        await this.addLog(workspaceId, 'info', '[DEV MODE] Code execution simulated');
+        return {
+          exitCode: 0,
+          stdout: `[Development Mode] Code would execute: ${code.substring(0, 100)}...`,
+          stderr: '',
+        };
+      }
+    } catch (error) {
+      console.error(`Error executing code in workspace ${workspaceId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Reconnect to existing PTY session
+   * Official Daytona API: process.connectPty(sessionId, options?)
+   */
+  async connectPty(
+    workspaceId: bigint,
+    sessionId: string,
+    onData: (data: Uint8Array) => void
+  ): Promise<any> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (workspace.status !== 'running') {
+      throw new ValidationError('Workspace is not running');
+    }
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+
+        console.log(`[DAYTONA PTY] Reconnecting to session ${sessionId}`);
+        const ptyHandle = await sandbox.process.connectPty(sessionId, { onData });
+
+        await ptyHandle.waitForConnection();
+        this.ptyHandles.set(sessionId, ptyHandle);
+
+        await this.addLog(workspaceId, 'info', `Reconnected to PTY session: ${sessionId}`);
+        console.log(`[DAYTONA PTY] ✓ Reconnected to ${sessionId}`);
+
+        return ptyHandle;
+      } else {
+        throw new Error('Daytona SDK not available');
+      }
+    } catch (error) {
+      console.error(`Error reconnecting to PTY session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get PTY session information
+   * Official Daytona API: process.getPtySessionInfo(sessionId)
+   */
+  async getPtySessionInfo(workspaceId: bigint, sessionId: string): Promise<any> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+        const info = await sandbox.process.getPtySessionInfo(sessionId);
+
+        console.log(`[DAYTONA PTY] Got info for session ${sessionId}:`, {
+          active: info.active,
+          cwd: info.cwd,
+          dimensions: `${info.cols}x${info.rows}`,
+        });
+
+        return info;
+      } else {
+        throw new Error('Daytona SDK not available');
+      }
+    } catch (error) {
+      console.error(`Error getting PTY session info for ${sessionId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * List all PTY sessions in sandbox (Daytona SDK method)
+   * Official Daytona API: process.listPtySessions()
+   * Note: This is different from the local listPtySessions(workspaceId) method above
+   */
+  async listDaytonaPtySessions(workspaceId: bigint): Promise<any[]> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+        const sessions = await sandbox.process.listPtySessions();
+
+        console.log(`[DAYTONA PTY] Listed ${sessions.length} PTY sessions from sandbox`);
+        return sessions;
+      } else {
+        return [];
+      }
+    } catch (error) {
+      console.error(`Error listing PTY sessions for workspace ${workspaceId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Resize PTY session
+   * Official Daytona API: process.resizePtySession(sessionId, cols, rows)
+   */
+  async resizePtySession(
+    workspaceId: bigint,
+    sessionId: string,
+    cols: number,
+    rows: number
+  ): Promise<any> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+
+        console.log(`[DAYTONA PTY] Resizing session ${sessionId} to ${cols}x${rows}`);
+        const result = await sandbox.process.resizePtySession(sessionId, cols, rows);
+
+        await this.addLog(workspaceId, 'info', `Resized PTY session ${sessionId} to ${cols}x${rows}`);
+        return result;
+      } else {
+        throw new Error('Daytona SDK not available');
+      }
+    } catch (error) {
+      console.error(`Error resizing PTY session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Kill PTY session (Daytona SDK method)
+   * Official Daytona API: process.killPtySession(sessionId)
+   * Note: This is different from the local killPtySession(sessionId) method above
+   */
+  async killDaytonaPtySession(workspaceId: bigint, sessionId: string): Promise<void> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+
+        console.log(`[DAYTONA PTY] Killing PTY session ${sessionId} via SDK`);
+        await sandbox.process.killPtySession(sessionId);
+
+        // Also clean up local reference
+        this.ptyHandles.delete(sessionId);
+
+        await this.addLog(workspaceId, 'info', `Killed PTY session: ${sessionId}`);
+        console.log(`[DAYTONA PTY] ✓ Killed session ${sessionId}`);
+      }
+    } catch (error) {
+      console.error(`Error killing PTY session ${sessionId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get session details with command history
+   * Official Daytona API: process.getSession(sessionId)
+   */
+  async getSessionDetails(workspaceId: bigint, sessionId: string): Promise<any> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+        const session = await sandbox.process.getSession(sessionId);
+
+        console.log(`[DAYTONA SESSION] Got session ${sessionId}:`, {
+          commandCount: session.commands?.length || 0,
+        });
+
+        return session;
+      } else {
+        throw new Error('Daytona SDK not available');
+      }
+    } catch (error) {
+      console.error(`Error getting session details for ${sessionId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * List all active sessions in sandbox
+   * Official Daytona API: process.listSessions()
+   */
+  async listDaytonaSessions(workspaceId: bigint): Promise<any[]> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+        const sessions = await sandbox.process.listSessions();
+
+        console.log(`[DAYTONA SESSION] Listed ${sessions.length} active sessions`);
+        return sessions;
+      } else {
+        return [];
+      }
+    } catch (error) {
+      console.error(`Error listing sessions for workspace ${workspaceId}:`, error);
+      return [];
+    }
+  }
+
+  // ============================================================================
+  // SSH Access Management
+  // ============================================================================
+
+  /**
+   * Create SSH access token for sandbox
+   * Official Daytona API: sandbox.createSshAccess(expiresInMinutes?)
+   *
+   * Returns a token that is used as the username when connecting to:
+   * ssh <token>@ssh.app.daytona.io
+   */
+  async createSshAccess(
+    workspaceId: bigint,
+    expiresInMinutes: number = 60
+  ): Promise<{
+    token: string;
+    expiresAt: Date;
+  }> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (!this.daytona || !workspace.daytona_sandbox_id) {
+      throw new ValidationError('Workspace not running or Daytona not configured');
+    }
+
+    try {
+      const sandbox = await this.getSandbox(workspace);
+
+      console.log(`[DAYTONA SSH] Creating SSH access for workspace ${workspaceId} (expires in ${expiresInMinutes}min)`);
+      const sshAccess = await sandbox.createSshAccess(expiresInMinutes);
+
+      await this.addLog(workspaceId, 'info', `Created SSH access token (expires in ${expiresInMinutes}min)`);
+
+      // Daytona SSH uses token-based authentication to ssh.app.daytona.io
+      // The token IS the username: ssh <token>@ssh.app.daytona.io
+      return {
+        token: sshAccess.token,
+        expiresAt: new Date(Date.now() + expiresInMinutes * 60 * 1000),
+      };
+    } catch (error) {
+      console.error(`[DAYTONA SSH] Failed to create SSH access:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate SSH access token
+   * Official Daytona API: sandbox.validateSshAccess(token)
+   */
+  async validateSshAccess(
+    workspaceId: bigint,
+    token: string
+  ): Promise<{ valid: boolean; expiresAt?: Date }> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (!this.daytona || !workspace.daytona_sandbox_id) {
+      throw new ValidationError('Workspace not running or Daytona not configured');
+    }
+
+    try {
+      const sandbox = await this.getSandbox(workspace);
+      const validation = await sandbox.validateSshAccess(token);
+
+      console.log(`[DAYTONA SSH] Validated SSH token: ${validation.valid ? 'VALID' : 'INVALID'}`);
+
+      return {
+        valid: validation.valid,
+        expiresAt: validation.expiresAt ? new Date(validation.expiresAt) : undefined,
+      };
+    } catch (error) {
+      console.error(`[DAYTONA SSH] Failed to validate SSH access:`, error);
+      return { valid: false };
+    }
+  }
+
+  /**
+   * Revoke SSH access token
+   * Official Daytona API: sandbox.revokeSshAccess(token)
+   */
+  async revokeSshAccess(workspaceId: bigint, token: string): Promise<void> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (!this.daytona || !workspace.daytona_sandbox_id) {
+      throw new ValidationError('Workspace not running or Daytona not configured');
+    }
+
+    try {
+      const sandbox = await this.getSandbox(workspace);
+
+      console.log(`[DAYTONA SSH] Revoking SSH access token`);
+      await sandbox.revokeSshAccess(token);
+
+      await this.addLog(workspaceId, 'info', 'Revoked SSH access token');
+      console.log(`[DAYTONA SSH] ✓ SSH access revoked`);
+    } catch (error) {
+      console.error(`[DAYTONA SSH] Failed to revoke SSH access:`, error);
+      throw error;
     }
   }
 }

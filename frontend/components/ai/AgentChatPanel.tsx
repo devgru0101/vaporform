@@ -14,7 +14,9 @@ import { AgentToolExecutor, AGENT_TOOLS } from '@/lib/agent/tools';
 import { api } from '@/lib/api';
 import { parseMarkdown } from './markdown';
 import { AgentTerminalMode } from '../terminal/AgentTerminalMode';
+import { ToolResultRenderer } from './ToolResultRenderer';
 import './AgentChatPanel.css';
+import './ToolResults.css';
 
 interface AgentChatPanelProps {
   projectId: string;
@@ -953,21 +955,26 @@ export const AgentChatPanel: React.FC<AgentChatPanelProps> = ({
               )}
             </div>
             <div className="agent-message-content">
-              <div
-                className="agent-message-text"
-                dangerouslySetInnerHTML={{
-                  __html: parseMarkdown(
-                    typeof message.content === 'string'
-                      ? message.content
-                      : Array.isArray(message.content)
-                      ? message.content
-                          .filter((block: any) => block.type === 'text')
-                          .map((block: any) => block.text)
-                          .join('\n')
-                      : JSON.stringify(message.content)
-                  )
-                }}
-              />
+              {/* Render text content */}
+              {(() => {
+                const textContent = typeof message.content === 'string'
+                  ? message.content
+                  : Array.isArray(message.content)
+                  ? message.content
+                      .filter((block: any) => block.type === 'text')
+                      .map((block: any) => block.text)
+                      .join('\n')
+                  : '';
+
+                return textContent ? (
+                  <div
+                    className="agent-message-text"
+                    dangerouslySetInnerHTML={{ __html: parseMarkdown(textContent) }}
+                  />
+                ) : null;
+              })()}
+
+              {/* Render tool use */}
               {message.toolUse && (
                 <div className={`agent-tool-use agent-tool-${message.toolUse.status}`}>
                   <div className="agent-tool-header">
@@ -984,6 +991,25 @@ export const AgentChatPanel: React.FC<AgentChatPanelProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* Render tool results with specialized components */}
+              {Array.isArray(message.content) && message.content
+                .filter((block: any) => block.type === 'tool_result')
+                .map((block: any, idx: number) => {
+                  // Extract tool name from previous message's tool_use
+                  const toolName = messages
+                    .slice(0, messages.indexOf(message))
+                    .reverse()
+                    .find(m => m.toolUse?.id === block.tool_use_id)?.toolUse?.tool || 'unknown';
+
+                  return (
+                    <ToolResultRenderer
+                      key={`tool-result-${block.tool_use_id}-${idx}`}
+                      toolName={toolName}
+                      result={block.content}
+                    />
+                  );
+                })}
             </div>
           </div>
         ))}

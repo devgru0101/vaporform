@@ -5,6 +5,8 @@
 
 import { daytonaManager } from '../workspace/daytona-manager.js';
 import { db } from '../projects/db.js';
+import { createGitManager } from '../git/git-manager.js';
+import { gridfs } from '../vfs/gridfs.js';
 
 export interface ToolExecutionContext {
   workspaceId: bigint;
@@ -82,6 +84,38 @@ export async function executeAgentTool(
 
       case 'attempt_completion':
         result = await handleAttemptCompletion(toolUse.input, projectId, workspaceId, jobId);
+        break;
+
+      case 'run_code':
+        result = await handleCodeRun(toolUse.input, workspaceId, jobId);
+        break;
+
+      case 'edit_file':
+        result = await handleEditFile(toolUse.input, workspaceId, projectId, jobId);
+        break;
+
+      case 'git_status':
+        result = await handleGitStatus(toolUse.input, projectId, jobId);
+        break;
+
+      case 'git_commit':
+        result = await handleGitCommit(toolUse.input, projectId, jobId);
+        break;
+
+      case 'git_log':
+        result = await handleGitLog(toolUse.input, projectId, jobId);
+        break;
+
+      case 'git_diff':
+        result = await handleGitDiff(toolUse.input, projectId, jobId);
+        break;
+
+      case 'install_package':
+        result = await handleInstallPackage(toolUse.input, workspaceId, projectId, jobId);
+        break;
+
+      case 'remove_package':
+        result = await handleRemovePackage(toolUse.input, workspaceId, projectId, jobId);
         break;
 
       // Daytona sandbox tools
@@ -920,6 +954,63 @@ async function indexFileForRAG(
   } catch (error) {
     console.error(`[RAG Indexer] Failed to index ${path}:`, error);
     // Don't throw - indexing failures should not break file writes
+  }
+}
+
+/**
+ * Handle run_code tool - Execute code in sandbox runtime
+ * NEW: Complete Daytona Process API coverage - codeRun() support
+ */
+async function handleCodeRun(
+  input: { code: string; language: string; timeout?: number },
+  workspaceId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { code, language, timeout = 30 } = input;
+
+  await logToolExecution(
+    jobId,
+    'run_code',
+    'info',
+    `Executing ${language} code (${code.length} bytes, timeout: ${timeout}s)`
+  );
+
+  try {
+    console.log(`[Tool Handler] Executing ${language} code via Daytona SDK...`);
+    const result = await daytonaManager.codeRun(workspaceId, code, undefined, timeout);
+
+    await logToolExecution(
+      jobId,
+      'run_code',
+      result.exitCode === 0 ? 'success' : 'warning',
+      `Code executed: exit=${result.exitCode}, stdout=${result.stdout.length}b, stderr=${result.stderr.length}b`
+    );
+
+    console.log(`[Tool Handler] ✓ Code execution completed: exit=${result.exitCode}`);
+
+    return {
+      success: result.exitCode === 0,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      artifacts: result.artifacts,
+      charts: result.artifacts?.charts || [],
+      language,
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[Tool Handler] Code execution failed:`, errorMsg);
+
+    await logToolExecution(jobId, 'run_code', 'error', `Code execution failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      exitCode: 1,
+      stdout: '',
+      stderr: errorMsg,
+      error: errorMsg,
+      language,
+    };
   }
 }
 
@@ -1852,5 +1943,386 @@ async function handleForceRebuildWorkspace(
       message: `Force rebuild failed: ${errorMsg}`,
       recommendation: 'Check workspace configuration and try again'
     };
+  }
+}
+
+// ============================================================================
+// NEW TOOL HANDLERS - Git, File Editing, Package Management
+// ============================================================================
+
+/**
+ * Handle edit_file tool - Targeted file editing
+ */
+async function handleEditFile(
+  input: { path: string; old_text: string; new_text: string },
+  workspaceId: bigint,
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { path, old_text, new_text } = input;
+
+  await logToolExecution(jobId, 'edit_file', 'info', `Editing file: ${path}`);
+
+  try {
+    // Read current file content
+    const buffer = await gridfs.readFile(projectId, path);
+    const content = buffer.toString('utf-8');
+
+    // Check if old_text exists
+    if (!content.includes(old_text)) {
+      return {
+        success: false,
+        error: `Text not found in file: "${old_text.substring(0, 100)}${old_text.length > 100 ? '...' : ''}"`,
+        message: 'The old_text was not found in the file. Make sure it matches exactly including whitespace.'
+      };
+    }
+
+    // Replace text
+    const newContent = content.replace(old_text, new_text);
+
+    // Write back to file
+    await gridfs.writeFile(projectId, path, Buffer.from(newContent), 'text/plain');
+
+    await logToolExecution(jobId, 'edit_file', 'success', `Successfully edited ${path}`);
+
+    return {
+      success: true,
+      path,
+      changes: {
+        removed: old_text.split('\n').length,
+        added: new_text.split('\n').length
+      },
+      message: `Successfully edited ${path}`
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'edit_file', 'error', `Failed to edit file: ${errorMsg}`);
+
+    return {
+      success: false,
+      error: errorMsg,
+      path
+    };
+  }
+}
+
+/**
+ * Handle git_status tool
+ */
+async function handleGitStatus(
+  input: Record<string, never>,
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  await logToolExecution(jobId, 'git_status', 'info', 'Getting git status');
+
+  try {
+    const git = createGitManager(projectId);
+
+    // Sync VFS files to git working directory
+    await git.syncFromVFS(projectId);
+
+    // Get status (this will use simple-git's status method)
+    const status = await (git as any).git.status();
+
+    return {
+      success: true,
+      modified: status.modified,
+      created: status.created,
+      deleted: status.deleted,
+      not_added: status.not_added,
+      conflicted: status.conflicted,
+      current_branch: status.current,
+      tracking: status.tracking,
+      ahead: status.ahead,
+      behind: status.behind
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'git_status', 'error', `Git status failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Handle git_commit tool
+ */
+async function handleGitCommit(
+  input: { message: string },
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { message } = input;
+
+  await logToolExecution(jobId, 'git_commit', 'info', `Creating commit: ${message}`);
+
+  try {
+    const git = createGitManager(projectId);
+
+    // Commit with auto-sync
+    const commit = await git.commit(projectId, message, 'Vaporform Agent', 'agent@vaporform.dev');
+
+    await logToolExecution(jobId, 'git_commit', 'success', `Created commit: ${commit.hash}`);
+
+    return {
+      success: true,
+      commit_hash: commit.hash,
+      message: commit.message,
+      author: commit.author_name,
+      files_changed: commit.files_changed,
+      timestamp: commit.timestamp
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'git_commit', 'error', `Commit failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Handle git_log tool
+ */
+async function handleGitLog(
+  input: { limit?: number },
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { limit = 10 } = input;
+
+  await logToolExecution(jobId, 'git_log', 'info', `Getting last ${limit} commits`);
+
+  try {
+    // Query commits from database
+    const commits = await db.query<{
+      commit_hash: string;
+      author_name: string;
+      author_email: string;
+      message: string;
+      timestamp: Date;
+      files_changed: number;
+    }>`
+      SELECT commit_hash, author_name, author_email, message, timestamp, files_changed
+      FROM git_commits
+      WHERE project_id = ${projectId}
+      ORDER BY timestamp DESC
+      LIMIT ${limit}
+    `;
+
+    return {
+      success: true,
+      commits: commits.map(c => ({
+        hash: c.commit_hash,
+        author: `${c.author_name} <${c.author_email}>`,
+        message: c.message,
+        timestamp: c.timestamp.toISOString(),
+        files_changed: c.files_changed
+      })),
+      count: commits.length
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'git_log', 'error', `Git log failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Handle git_diff tool
+ */
+async function handleGitDiff(
+  input: { path?: string },
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { path } = input;
+
+  await logToolExecution(jobId, 'git_diff', 'info', `Getting diff${path ? ` for ${path}` : ''}`);
+
+  try {
+    const git = createGitManager(projectId);
+
+    // Sync VFS to git working directory
+    await git.syncFromVFS(projectId);
+
+    // Get diff using simple-git
+    const diff = await (git as any).git.diff(path ? [path] : []);
+
+    return {
+      success: true,
+      diff,
+      path: path || 'all files',
+      has_changes: diff.length > 0
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'git_diff', 'error', `Git diff failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Handle install_package tool
+ */
+async function handleInstallPackage(
+  input: { package: string; dev?: boolean; version?: string },
+  workspaceId: bigint,
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { package: packageName, dev = false, version } = input;
+  const fullPackage = version ? `${packageName}@${version}` : packageName;
+
+  await logToolExecution(jobId, 'install_package', 'info', `Installing ${fullPackage}${dev ? ' (dev)' : ''}`);
+
+  try {
+    // Detect package manager
+    const packageManager = await detectPackageManager(workspaceId, projectId);
+
+    // Build install command
+    let command: string;
+    switch (packageManager) {
+      case 'pnpm':
+        command = `pnpm add ${dev ? '-D' : ''} ${fullPackage}`;
+        break;
+      case 'yarn':
+        command = `yarn add ${dev ? '-D' : ''} ${fullPackage}`;
+        break;
+      case 'npm':
+      default:
+        command = `npm install ${dev ? '--save-dev' : '--save'} ${fullPackage}`;
+        break;
+    }
+
+    // Execute install command
+    const result = await daytonaManager.executeCommand(workspaceId, command);
+
+    if (result.exitCode !== 0) {
+      return {
+        success: false,
+        package: fullPackage,
+        error: result.stderr || result.stdout,
+        package_manager: packageManager
+      };
+    }
+
+    await logToolExecution(jobId, 'install_package', 'success', `Installed ${fullPackage}`);
+
+    return {
+      success: true,
+      package: fullPackage,
+      dev,
+      package_manager: packageManager,
+      message: `Successfully installed ${fullPackage} using ${packageManager}`
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'install_package', 'error', `Install failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      package: fullPackage,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Handle remove_package tool
+ */
+async function handleRemovePackage(
+  input: { package: string },
+  workspaceId: bigint,
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { package: packageName } = input;
+
+  await logToolExecution(jobId, 'remove_package', 'info', `Removing ${packageName}`);
+
+  try {
+    // Detect package manager
+    const packageManager = await detectPackageManager(workspaceId, projectId);
+
+    // Build remove command
+    let command: string;
+    switch (packageManager) {
+      case 'pnpm':
+        command = `pnpm remove ${packageName}`;
+        break;
+      case 'yarn':
+        command = `yarn remove ${packageName}`;
+        break;
+      case 'npm':
+      default:
+        command = `npm uninstall ${packageName}`;
+        break;
+    }
+
+    // Execute remove command
+    const result = await daytonaManager.executeCommand(workspaceId, command);
+
+    if (result.exitCode !== 0) {
+      return {
+        success: false,
+        package: packageName,
+        error: result.stderr || result.stdout,
+        package_manager: packageManager
+      };
+    }
+
+    await logToolExecution(jobId, 'remove_package', 'success', `Removed ${packageName}`);
+
+    return {
+      success: true,
+      package: packageName,
+      package_manager: packageManager,
+      message: `Successfully removed ${packageName} using ${packageManager}`
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    await logToolExecution(jobId, 'remove_package', 'error', `Remove failed: ${errorMsg}`);
+
+    return {
+      success: false,
+      package: packageName,
+      error: errorMsg
+    };
+  }
+}
+
+/**
+ * Detect package manager from project files
+ */
+async function detectPackageManager(workspaceId: bigint, projectId: bigint): Promise<'npm' | 'yarn' | 'pnpm'> {
+  try {
+    // Check for lock files in VFS
+    const files = await gridfs.listDirectory(projectId, '/');
+    const fileNames = files.map(f => f.path);
+
+    if (fileNames.includes('/pnpm-lock.yaml')) {
+      return 'pnpm';
+    }
+    if (fileNames.includes('/yarn.lock')) {
+      return 'yarn';
+    }
+    return 'npm'; // Default to npm
+  } catch {
+    return 'npm'; // Default to npm on error
   }
 }

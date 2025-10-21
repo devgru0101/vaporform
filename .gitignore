@@ -61,7 +61,8 @@ backup-*
 .dockerignore
 docker-compose.override.yml
 
-# Documentation - ignore all .md files except README files
+# Documentation - ignore all .md files except README and CLAUDE.md
 *.md
 !README.md
 !**/README.md
+!CLAUDE.md

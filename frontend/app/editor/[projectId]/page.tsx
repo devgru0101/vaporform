@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { use } from 'react';
 import dynamic from 'next/dynamic';
+import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import { MonacoEditor } from '@/components/editor/MonacoEditor';
 import { FileTree } from '@/components/editor/FileTree';
 import { AgentChatPanel } from '@/components/ai/AgentChatPanel';
@@ -29,7 +30,6 @@ export default function EditorPage({
   const [fileContent, setFileContent] = useState('');
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
-  const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
   const [aiAssistantTab, setAiAssistantTab] = useState<'chat' | 'terminal' | 'git' | null>('chat');
   const [fileExplorerTab, setFileExplorerTab] = useState<'explorer' | 'search' | null>('explorer');
   const [showAiAssistant, setShowAiAssistant] = useState(true);
@@ -63,12 +63,6 @@ export default function EditorPage({
       const chatResponse = await api.createChatSession(projectId, 'Main Session');
       if (chatResponse.session) {
         setChatSessionId(chatResponse.session.id.toString());
-      }
-
-      // Create terminal session
-      const terminalResponse = await api.createTerminalSession(projectId);
-      if (terminalResponse.session) {
-        setTerminalSessionId(terminalResponse.session.id.toString());
       }
     } catch (error) {
       console.error('Failed to initialize sessions:', error);
@@ -254,15 +248,6 @@ export default function EditorPage({
     );
   }
 
-  // Grid: Activity Bar (48px) | AI Assistant (320px) | File Explorer (200px) | Editor (1fr)
-  const gridColumns = showAiAssistant && showFileExplorer
-    ? '48px 320px 200px 1fr'
-    : showAiAssistant && !showFileExplorer
-    ? '48px 320px 1fr'
-    : !showAiAssistant && showFileExplorer
-    ? '48px 200px 1fr'
-    : '48px 1fr';
-
   return (
     <>
       <style jsx>{`
@@ -280,16 +265,15 @@ export default function EditorPage({
         width: '100vw',
         background: 'var(--vf-bg-primary)',
         color: 'var(--vf-text-primary)',
-        display: 'grid',
-        gridTemplateRows: '40px 36px 1fr 24px',
-        gridTemplateColumns: gridColumns,
+        display: 'flex',
+        flexDirection: 'column',
         overflow: 'hidden',
         fontFamily: 'var(--vf-font-body)'
       }}>
       {/* HEADER / TOP NAV */}
       <div style={{
-        gridColumn: '1 / -1',
-        gridRow: '1',
+        height: '40px',
+        minHeight: '40px',
         background: 'var(--vf-bg-primary)',
         borderBottom: '1px solid var(--vf-border-primary)',
         display: 'flex',
@@ -489,18 +473,34 @@ export default function EditorPage({
         </div>
       </div>
 
-      {/* ACTIVITY BAR (Column 1 - 48px) */}
-      <div style={{
-        gridColumn: '1',
-        gridRow: '2',
-        background: 'var(--vf-bg-secondary)',
-        borderRight: '2px solid var(--vf-border-primary)',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        padding: 'var(--vf-space-2) 0',
-        gap: 'var(--vf-space-1)'
-      }}>
+      {/* MAIN CONTENT AREA - Resizable Panels */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        <PanelGroup direction="horizontal">
+          {/* ACTIVITY BAR - Fixed 48px */}
+          <Panel defaultSize={2} minSize={2} maxSize={2} style={{
+            background: 'var(--vf-bg-secondary)',
+            borderRight: '2px solid var(--vf-border-primary)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden'
+          }}>
+            {/* Activity Bar Header */}
+            <div style={{
+              height: '36px',
+              minHeight: '36px',
+              background: 'var(--vf-bg-secondary)',
+              borderBottom: '2px solid var(--vf-border-primary)'
+            }} />
+            {/* Activity Bar Icons */}
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              padding: 'var(--vf-space-2) 0',
+              gap: 'var(--vf-space-1)',
+              overflow: 'hidden'
+            }}>
         {/* Explorer Icon - toggles File Explorer */}
         <button
           onClick={() => toggleFileExplorerItem('explorer')}
@@ -549,6 +549,59 @@ export default function EditorPage({
           </svg>
         </button>
 
+        {/* Chat Icon - AI Assistant Chat */}
+        <button
+          onClick={() => {
+            setAiAssistantTab('chat');
+            setShowAiAssistant(true);
+          }}
+          style={{
+            width: '40px',
+            height: '40px',
+            background: aiAssistantTab === 'chat' && showAiAssistant ? 'var(--vf-bg-primary)' : 'transparent',
+            border: '2px solid',
+            borderColor: aiAssistantTab === 'chat' && showAiAssistant ? 'var(--vf-accent-primary)' : 'transparent',
+            color: aiAssistantTab === 'chat' ? 'var(--vf-accent-primary)' : 'var(--vf-text-muted)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all var(--vf-transition-fast)'
+          }}
+          title="Chat"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </button>
+
+        {/* Terminal Icon - AI Assistant Terminal */}
+        <button
+          onClick={() => {
+            setAiAssistantTab('terminal');
+            setShowAiAssistant(true);
+          }}
+          style={{
+            width: '40px',
+            height: '40px',
+            background: aiAssistantTab === 'terminal' && showAiAssistant ? 'var(--vf-bg-primary)' : 'transparent',
+            border: '2px solid',
+            borderColor: aiAssistantTab === 'terminal' && showAiAssistant ? 'var(--vf-accent-primary)' : 'transparent',
+            color: aiAssistantTab === 'terminal' ? 'var(--vf-accent-primary)' : 'var(--vf-text-muted)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all var(--vf-transition-fast)'
+          }}
+          title="Terminal"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+        </button>
+
         {/* Git Icon */}
         <button
           onClick={() => {
@@ -574,48 +627,56 @@ export default function EditorPage({
             <path d="M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9l-6 6"/>
           </svg>
         </button>
-      </div>
+            </div>
+          </Panel>
 
-      {/* AI ASSISTANT PANEL (Column 2 - 320px - LEFT SIDE) */}
-      {showAiAssistant && (
-        <div style={{
-          gridColumn: '2',
-          gridRow: '2 / 4',
-          background: 'var(--vf-bg-tertiary)',
-          borderRight: '2px solid var(--vf-border-primary)',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden'
-        }}>
-          {/* Panel Content */}
-          <div style={{ flex: 1, overflow: 'hidden' }}>
-            {aiAssistantTab === 'chat' && (
-              <AgentChatPanel projectId={projectId} workspaceId={workspaceId || undefined} />
-            )}
-            {aiAssistantTab === 'terminal' && workspaceId && (
-              <Terminal
-                projectId={projectId}
-                workspaceId={workspaceId}
-                sessionId={terminalSessionId || undefined}
-              />
-            )}
-            {aiAssistantTab === 'git' && (
-              <GitPanel projectId={projectId} />
-            )}
-          </div>
-        </div>
-      )}
+          {/* AI ASSISTANT PANEL - Resizable 240-600px */}
+          {showAiAssistant && (
+            <>
+              <PanelResizeHandle />
+              <Panel defaultSize={15} minSize={10} maxSize={30} style={{
+                background: 'var(--vf-bg-tertiary)',
+                borderRight: '2px solid var(--vf-border-primary)',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden'
+              }}>
+                {/* AI Assistant has no sub-header, content fills entire panel */}
+                <div style={{ flex: 1, overflow: 'hidden' }}>
+                  {aiAssistantTab === 'chat' && (
+                    <AgentChatPanel projectId={projectId} workspaceId={workspaceId || undefined} />
+                  )}
+                  {aiAssistantTab === 'terminal' && workspaceId && (
+                    <Terminal
+                      projectId={projectId}
+                      workspaceId={workspaceId}
+                    />
+                  )}
+                  {aiAssistantTab === 'git' && (
+                    <GitPanel projectId={projectId} />
+                  )}
+                </div>
+              </Panel>
+            </>
+          )}
 
-      {/* SUB-HEADER (spans File Explorer + Editor columns) */}
-      <div style={{
-        gridColumn: showAiAssistant ? '3 / 5' : '2 / 4',
-        gridRow: '2',
-        background: 'var(--vf-bg-secondary)',
-        borderBottom: '2px solid var(--vf-border-primary)',
-        display: 'flex',
-        gap: '2px',
-        padding: '0'
-      }}>
+          {/* RIGHT SIDE PANELS (File Explorer + Editor/Preview) */}
+          <PanelResizeHandle />
+          <Panel style={{
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden'
+          }}>
+            {/* SUB-HEADER (spans File Explorer + Editor columns) */}
+            <div style={{
+              height: '36px',
+              minHeight: '36px',
+              background: 'var(--vf-bg-secondary)',
+              borderBottom: '2px solid var(--vf-border-primary)',
+              display: 'flex',
+              gap: '2px',
+              padding: '0'
+            }}>
         <button
           onClick={() => setViewMode('editor')}
           style={{
@@ -654,93 +715,96 @@ export default function EditorPage({
         >
           PREVIEW
         </button>
-      </div>
-
-      {/* FILE EXPLORER (Column 3 - 200px - MIDDLE) - Only in Editor mode */}
-      {viewMode === 'editor' && showFileExplorer && (
-        <div style={{
-          gridColumn: showAiAssistant ? '3' : '2',
-          gridRow: '3',
-          background: 'var(--vf-bg-tertiary)',
-          borderRight: '2px solid var(--vf-border-primary)',
-          overflow: 'auto',
-          display: 'flex',
-          flexDirection: 'column'
-        }}>
-          {fileExplorerTab === 'explorer' && (
-            <FileTree
-              projectId={projectId}
-              onFileSelect={handleFileSelect}
-              selectedPath={currentFile || undefined}
-            />
-          )}
-          {fileExplorerTab === 'search' && (
-            <div style={{ padding: 'var(--vf-space-4)', color: 'var(--vf-text-muted)' }}>
-              Search functionality coming soon...
             </div>
-          )}
-        </div>
-      )}
 
-      {/* EDITOR MODE - MAIN EDITOR AREA (Column 4 - 1fr - RIGHT SIDE) */}
-      {viewMode === 'editor' && (
-        <div style={{
-          gridColumn: showAiAssistant && showFileExplorer ? '4' : showAiAssistant ? '3' : showFileExplorer ? '3' : '2',
-          gridRow: '3',
-        background: 'var(--vf-bg-primary)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden'
-      }}>
-        {currentFile ? (
-          <MonacoEditor
-            value={fileContent}
-            language={getLanguageFromPath(currentFile)}
-            onChange={handleEditorChange}
-            onSave={handleSave}
-          />
-        ) : (
-          <div style={{
-            height: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexDirection: 'column',
-            gap: 'var(--vf-space-3)'
-          }}>
-            <div style={{
-              fontFamily: 'var(--vf-font-display)',
-              fontSize: 'var(--vf-text-2xl)',
-              fontWeight: 'var(--vf-weight-black)',
-              color: 'var(--vf-accent-primary)',
-              letterSpacing: '0.1em'
-            }}>
-              VAPORFORM EDITOR
-            </div>
-            <div style={{
-              fontFamily: 'var(--vf-font-body)',
-              fontSize: 'var(--vf-text-base)',
-              color: 'var(--vf-text-secondary)'
-            }}>
-              Select a file from the explorer to start editing
-            </div>
-          </div>
-        )}
-      </div>
-      )}
+            {/* Content area below sub-header */}
+            <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+              {/* EDITOR MODE - File Explorer + Editor */}
+              {viewMode === 'editor' && (
+                <PanelGroup direction="horizontal">
+                  {/* FILE EXPLORER - Resizable 150-400px */}
+                  {showFileExplorer && (
+                    <>
+                      <Panel defaultSize={12} minSize={8} maxSize={20} style={{
+                        background: 'var(--vf-bg-tertiary)',
+                        borderRight: '2px solid var(--vf-border-primary)',
+                        overflow: 'auto',
+                        display: 'flex',
+                        flexDirection: 'column'
+                      }}>
+                        {fileExplorerTab === 'explorer' && (
+                          <FileTree
+                            projectId={projectId}
+                            onFileSelect={handleFileSelect}
+                            selectedPath={currentFile || undefined}
+                          />
+                        )}
+                        {fileExplorerTab === 'search' && (
+                          <div style={{ padding: 'var(--vf-space-4)', color: 'var(--vf-text-muted)' }}>
+                            Search functionality coming soon...
+                          </div>
+                        )}
+                      </Panel>
+                      <PanelResizeHandle />
+                    </>
+                  )}
 
-      {/* PREVIEW MODE - Embedded iframe with authentication */}
-      {viewMode === 'preview' && (
-        <div style={{
-          gridColumn: showAiAssistant ? '3 / 5' : '2 / 4',
-          gridRow: '3',
-          background: 'var(--vf-bg-primary)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          overflow: 'hidden'
-        }}>
+                  {/* MAIN EDITOR AREA - Fills remaining space */}
+                  <Panel style={{
+                    background: 'var(--vf-bg-primary)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden'
+                  }}>
+                    {currentFile ? (
+                      <MonacoEditor
+                        value={fileContent}
+                        language={getLanguageFromPath(currentFile)}
+                        onChange={handleEditorChange}
+                        onSave={handleSave}
+                      />
+                    ) : (
+                      <div style={{
+                        height: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'column',
+                        gap: 'var(--vf-space-3)'
+                      }}>
+                        <div style={{
+                          fontFamily: 'var(--vf-font-display)',
+                          fontSize: 'var(--vf-text-2xl)',
+                          fontWeight: 'var(--vf-weight-black)',
+                          color: 'var(--vf-accent-primary)',
+                          letterSpacing: '0.1em'
+                        }}>
+                          VAPORFORM EDITOR
+                        </div>
+                        <div style={{
+                          fontFamily: 'var(--vf-font-body)',
+                          fontSize: 'var(--vf-text-base)',
+                          color: 'var(--vf-text-secondary)'
+                        }}>
+                          Select a file from the explorer to start editing
+                        </div>
+                      </div>
+                    )}
+                  </Panel>
+                </PanelGroup>
+              )}
+
+              {/* PREVIEW MODE - Embedded iframe with authentication */}
+              {viewMode === 'preview' && (
+                <div style={{
+                  flex: 1,
+                  background: 'var(--vf-bg-primary)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  overflow: 'hidden'
+                }}>
           {workspaceLoading ? (
             <div style={{
               fontFamily: 'var(--vf-font-display)',
@@ -826,13 +890,17 @@ export default function EditorPage({
               </button>
             </div>
           )}
-        </div>
-      )}
+                </div>
+              )}
+            </div>
+          </Panel>
+        </PanelGroup>
+      </div>
 
       {/* STATUS BAR */}
       <div style={{
-        gridColumn: '1 / -1',
-        gridRow: '4',
+        height: '24px',
+        minHeight: '24px',
         background: 'var(--vf-bg-secondary)',
         borderTop: '2px solid var(--vf-border-primary)',
         display: 'flex',
