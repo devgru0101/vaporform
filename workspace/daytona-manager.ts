@@ -95,6 +95,9 @@ export class DaytonaManager {
   /**
    * Map template/language names to Daytona-supported languages
    * Daytona supports: python, typescript, javascript
+   *
+   * For unsupported languages (Go, Rust, Flutter, etc.), we map to the closest base image.
+   * Users can install additional tooling via terminal or project setup scripts.
    */
   private normalizeDaytonaLanguage(language?: string): string {
     if (!language) return 'typescript';
@@ -131,18 +134,58 @@ export class DaytonaManager {
       'django': 'python',
       'flask': 'python',
       'fastapi': 'python',
+
+      // Go (map to typescript - user can install Go via terminal)
+      'go': 'typescript',
+      'golang': 'typescript',
+      'gin': 'typescript',
+
+      // Rust (map to typescript - user can install Rust via terminal)
+      'rust': 'typescript',
+      'rs': 'typescript',
+
+      // Dart/Flutter (map to typescript - user can install Flutter SDK via terminal)
+      'dart': 'typescript',
+      'flutter': 'typescript',
+
+      // Java (map to typescript - user can install JDK via terminal)
+      'java': 'typescript',
+
+      // C# (map to typescript - user can install .NET SDK via terminal)
+      'csharp': 'typescript',
+      'c#': 'typescript',
+      'dotnet': 'typescript',
+
+      // PHP (map to typescript - user can install PHP via terminal)
+      'php': 'typescript',
+      'laravel': 'typescript',
+
+      // Ruby (map to typescript - user can install Ruby via terminal)
+      'ruby': 'typescript',
+      'rails': 'typescript',
+
+      // Kotlin (map to typescript - user can install Kotlin via terminal)
+      'kotlin': 'typescript',
+
+      // Swift (map to typescript - user can install Swift via terminal)
+      'swift': 'typescript',
+
+      // C/C++ (map to typescript - compilers available in most images)
+      'c': 'typescript',
+      'cpp': 'typescript',
+      'c++': 'typescript',
     };
 
     const mapped = languageMap[normalized];
     if (mapped) {
       if (mapped !== normalized) {
-        console.log(`[DAYTONA] Mapped language '${language}' -> '${mapped}'`);
+        console.log(`[DAYTONA] Mapped language '${language}' -> '${mapped}' (base image)`);
       }
       return mapped;
     }
 
     // Default to typescript for unknown languages
-    console.log(`[DAYTONA] Unknown language '${language}', defaulting to 'typescript'`);
+    console.log(`[DAYTONA] Unknown language '${language}', defaulting to 'typescript' base image`);
     return 'typescript';
   }
 
@@ -564,6 +607,53 @@ export class DaytonaManager {
   }
 
   /**
+   * Get or create workspace for a project
+   * Used by auto-build to ensure a workspace exists before building
+   */
+  async getOrCreateWorkspace(projectId: bigint): Promise<Workspace> {
+    // Try to get existing workspace
+    let workspace = await this.getProjectWorkspace(projectId);
+
+    if (workspace) {
+      console.log(`[Auto-Build] Using existing workspace ${workspace.id} for project ${projectId}`);
+      return workspace;
+    }
+
+    // No workspace exists - create one
+    console.log(`[Auto-Build] No workspace found for project ${projectId}, creating one...`);
+
+    // Get project details to determine workspace name and template
+    const { db: projectDB } = await import('../projects/db.js');
+    const project = await projectDB.queryRow<{ id: bigint; name: string; template: string | null }>`
+      SELECT id, name, template FROM projects WHERE id = ${projectId}
+    `;
+
+    if (!project) {
+      throw new Error(`Project ${projectId} not found`);
+    }
+
+    const workspaceName = `${project.name} Workspace`;
+    const template = project.template || 'typescript';
+
+    console.log(`[Auto-Build] Creating workspace for project ${projectId} (${project.name})`);
+
+    workspace = await this.createWorkspace(projectId, workspaceName, {
+      language: template,
+      environment: {
+        PROJECT_ID: projectId.toString(),
+        PROJECT_NAME: project.name,
+      },
+      autoStopInterval: 60, // Auto-stop after 1 hour
+      autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
+      ephemeral: false,
+    });
+
+    console.log(`[Auto-Build] ✓ Created workspace ${workspace.id} for project ${projectId}`);
+
+    return workspace;
+  }
+
+  /**
    * Get Daytona sandbox instance
    */
   private async getSandbox(workspace: Workspace) {
@@ -722,27 +812,42 @@ export class DaytonaManager {
 
         await this.addLog(workspaceId, 'info', `Executed command: ${command}`);
 
-        // ExecuteResponse structure per Daytona SDK docs:
+        // ExecuteResponse structure per Daytona SDK v0.108.0:
         // - exitCode: number (main exit code)
-        // - result: string (primary output)
-        // - artifacts?: { stdout: string, charts?: Chart[] }
+        // - result: string (primary output - THIS IS THE MAIN FIELD)
+        // - artifacts?: { stdout: string (same as result), charts?: Chart[] }
+        // NOTE: There is NO stderr field in Daytona SDK responses
         const response = result as any;
 
-        // CRITICAL: Properly extract stdout, stderr, and errors from ExecuteResponse
-        // Daytona may put errors in stderr OR in result field if exitCode != 0
-        const stdout = response.artifacts?.stdout || response.stdout || response.result || '';
-        const stderr = response.stderr || (response.exitCode !== 0 ? response.result : '') || '';
+        // Debug logging to understand response structure
+        console.log(`[DAYTONA] Command executed: ${command}`);
+        console.log(`[DAYTONA] Response keys:`, Object.keys(response));
+        console.log(`[DAYTONA] exitCode:`, response.exitCode);
+        console.log(`[DAYTONA] result length:`, response.result?.length || 0);
+        console.log(`[DAYTONA] artifacts.stdout length:`, response.artifacts?.stdout?.length || 0);
+
+        // FIXED: Use response.result as PRIMARY source (this is where Daytona puts ALL output)
+        // Daytona does not separate stdout/stderr - everything goes in result
+        const output = response.result || response.artifacts?.stdout || '';
         const exitCode = response.exitCode || response.code || 0;
+
+        // Log output preview for debugging
+        if (output) {
+          const preview = output.substring(0, 200);
+          console.log(`[DAYTONA] Output preview (${output.length} chars): ${preview}${output.length > 200 ? '...' : ''}`);
+        } else if (exitCode === 0) {
+          console.warn(`[DAYTONA] Command succeeded but returned no output: ${command}`);
+        }
 
         // Log error details for debugging
         if (exitCode !== 0) {
           console.error(`[DAYTONA] Command failed (exit ${exitCode}):`, command);
-          console.error(`[DAYTONA] stderr:`, stderr);
+          console.error(`[DAYTONA] Error output:`, output);
         }
 
         return {
-          stdout,
-          stderr,
+          stdout: output,
+          stderr: '', // Daytona SDK doesn't provide separate stderr
           exitCode,
         };
       } else {
@@ -756,6 +861,93 @@ export class DaytonaManager {
       }
     } catch (error) {
       console.error(`Error executing command in workspace ${workspaceId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute AI-generated code in workspace (using Daytona codeRun API)
+   * This is optimized for AI-generated code execution with automatic artifact capture
+   */
+  async codeRun(
+    workspaceId: bigint,
+    code: string,
+    language?: string,
+    argv?: string[],
+    env?: Record<string, string>
+  ): Promise<{ exitCode: number; result: string; artifacts?: { stdout: string; charts?: any[] } }> {
+    const workspace = await this.getWorkspace(workspaceId);
+
+    if (workspace.status !== 'running') {
+      throw new ValidationError('Workspace is not running');
+    }
+
+    try {
+      if (this.daytona && workspace.daytona_sandbox_id) {
+        const sandbox = await this.getSandbox(workspace);
+
+        console.log(`[DAYTONA codeRun] Executing ${language || 'python'} code (${code.length} chars)`);
+        if (argv) console.log(`[DAYTONA codeRun] argv:`, argv);
+        if (env) console.log(`[DAYTONA codeRun] env keys:`, Object.keys(env));
+
+        // Use Daytona's codeRun method for AI-generated code
+        // This automatically handles artifact capture (charts, outputs, etc.)
+        const result = await sandbox.process.codeRun(code, { argv, env });
+
+        await this.addLog(workspaceId, 'info', `Executed ${language || 'python'} code via codeRun`);
+
+        // CodeRun response structure per Daytona SDK:
+        // - exitCode: number
+        // - result: string (stdout)
+        // - artifacts?: { stdout: string, charts?: Chart[] }
+        const response = result as any;
+
+        console.log(`[DAYTONA codeRun] Response:`, {
+          exitCode: response.exitCode,
+          resultLength: response.result?.length || 0,
+          hasArtifacts: !!response.artifacts,
+          hasCharts: !!response.artifacts?.charts,
+          chartCount: response.artifacts?.charts?.length || 0,
+        });
+
+        // Log output preview
+        if (response.result) {
+          const preview = response.result.substring(0, 200);
+          console.log(`[DAYTONA codeRun] Output preview: ${preview}${response.result.length > 200 ? '...' : ''}`);
+        }
+
+        // Log chart info if any
+        if (response.artifacts?.charts?.length) {
+          console.log(`[DAYTONA codeRun] ✓ Generated ${response.artifacts.charts.length} chart(s)`);
+          response.artifacts.charts.forEach((chart: any, idx: number) => {
+            console.log(`[DAYTONA codeRun]   Chart ${idx + 1}:`, {
+              title: chart.title || 'Untitled',
+              hasPng: !!chart.png,
+              pngSize: chart.png ? chart.png.length : 0,
+            });
+          });
+        }
+
+        if (response.exitCode !== 0) {
+          console.error(`[DAYTONA codeRun] Code execution failed (exit ${response.exitCode})`);
+        }
+
+        return {
+          exitCode: response.exitCode || 0,
+          result: response.result || '',
+          artifacts: response.artifacts,
+        };
+      } else {
+        // Development mode
+        await this.addLog(workspaceId, 'info', `[DEV MODE] Simulated codeRun: ${code.substring(0, 100)}...`);
+        return {
+          exitCode: 0,
+          result: `[Development Mode] Code executed: ${code.substring(0, 100)}...`,
+          artifacts: { stdout: '[Development Mode] No artifacts in dev mode' },
+        };
+      }
+    } catch (error) {
+      console.error(`Error executing code in workspace ${workspaceId}:`, error);
       throw error;
     }
   }
@@ -970,7 +1162,7 @@ export class DaytonaManager {
         }
       }
 
-      console.log(`[DAYTONA] No healthy preview URL found on any common port`);
+      console.log(`[DAYTONA] No dev server running on any common port - this is normal for empty/YOLO projects`);
       return null;
     } catch (error) {
       console.error(`[DAYTONA] Error getting sandbox URL for workspace ${workspaceId}:`, error);
@@ -2912,6 +3104,7 @@ export class DaytonaManager {
       throw error;
     }
   }
+
 }
 
 // Singleton instance

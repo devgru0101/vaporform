@@ -8,8 +8,72 @@ import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { daytonaManager } from './daytona-manager.js';
 import { buildManager } from './build-manager.js';
+import { syncManager } from './sync-manager.js';
 import { ValidationError, toAPIError } from '../shared/errors.js';
 import { db as projectDB } from '../projects/db.js';
+
+/**
+ * Helper function to trigger auto-build if needed
+ * Checks if project needs a build and triggers it asynchronously
+ */
+async function triggerAutoBuildIfNeeded(projectId: bigint, workspaceId: bigint): Promise<void> {
+  try {
+    // Check if project needs auto-build
+    const builds = await buildManager.listBuilds(projectId, 1);
+
+    // Trigger build if no builds exist OR last build failed OR last successful build is old
+    let shouldBuild = false;
+
+    if (builds.length === 0) {
+      console.log(`[Auto-Build] No builds found for project ${projectId}, triggering initial build`);
+      shouldBuild = true;
+    } else {
+      const lastBuild = builds[0];
+
+      if (lastBuild.status === 'failed') {
+        console.log(`[Auto-Build] Last build failed for project ${projectId}, skipping auto-rebuild`);
+        // Don't auto-rebuild if last build failed - user should explicitly fix and rebuild
+        shouldBuild = false;
+      } else if (lastBuild.status === 'building' || lastBuild.status === 'pending') {
+        console.log(`[Auto-Build] Build already in progress for project ${projectId}`);
+        shouldBuild = false;
+      } else if (lastBuild.status === 'success') {
+        // Don't auto-rebuild if successful build within last hour
+        const hourAgo = Date.now() - (60 * 60 * 1000);
+        const completedAt = lastBuild.completed_at ? lastBuild.completed_at.getTime() : 0;
+
+        if (completedAt > hourAgo) {
+          console.log(`[Auto-Build] Recent successful build exists for project ${projectId}, skipping`);
+          shouldBuild = false;
+        } else {
+          console.log(`[Auto-Build] Last successful build is old for project ${projectId}, triggering rebuild`);
+          shouldBuild = true;
+        }
+      }
+    }
+
+    if (shouldBuild) {
+      console.log(`[Auto-Build] Triggering auto-build for project ${projectId}`);
+
+      // Create and start build (BuildManager handles queue/mutex)
+      const build = await buildManager.createBuild(projectId, workspaceId, {
+        trigger: 'auto',
+        initiatedBy: 'workspace_access',
+        timestamp: new Date().toISOString()
+      });
+
+      // Start build in background (don't await)
+      buildManager.startBuild(build.id).catch(err => {
+        console.error(`[Auto-Build] Build ${build.id} failed:`, err);
+      });
+
+      console.log(`[Auto-Build] Build ${build.id} started for project ${projectId}`);
+    }
+  } catch (error) {
+    console.error(`[Auto-Build] Error checking/triggering auto-build:`, error);
+    // Don't throw - auto-build failures shouldn't block workspace URL retrieval
+  }
+}
 
 interface CreateWorkspaceRequest {
   authorization: Header<'Authorization'>;
@@ -80,6 +144,24 @@ interface ExecuteCommandResponse {
   exitCode: number;
 }
 
+interface CodeRunRequest {
+  authorization: Header<'Authorization'>;
+  workspaceId: string;
+  code: string;
+  language?: string;
+  argv?: string[];
+  env?: Record<string, string>;
+}
+
+interface CodeRunResponse {
+  exitCode: number;
+  result: string;
+  artifacts?: {
+    stdout: string;
+    charts?: any[];
+  };
+}
+
 interface BuildProjectRequest {
   authorization: Header<'Authorization'>;
   projectId: string;
@@ -132,6 +214,15 @@ export const createWorkspace = api(
       }
     );
 
+    // Start bidirectional sync for this workspace
+    try {
+      await syncManager.startSync(projectId, workspace.id);
+      console.log(`[Workspace API] Started VFS ↔ Daytona sync for workspace ${workspace.id}`);
+    } catch (error) {
+      console.error(`[Workspace API] Failed to start sync:`, error);
+      // Continue anyway - sync is not critical for workspace creation
+    }
+
     return { workspace };
   }
 );
@@ -161,10 +252,18 @@ export const getWorkspace = api(
 export const getProjectWorkspace = api(
   { method: 'GET', path: '/workspace/project/:projectId' },
   async (req: GetProjectWorkspaceRequest): Promise<{ workspace: any | null }> => {
+    console.log(`[Workspace API] ========== getProjectWorkspace called ==========`);
+    console.log(`[Workspace API] Project ID: ${req.projectId}`);
+    console.log(`[Workspace API] waitForReady: ${req.waitForReady}`);
+
     const { userId } = await verifyClerkJWT(req.authorization);
     const projectId = BigInt(req.projectId);
 
+    console.log(`[Workspace API] User ID: ${userId}`);
+
     await ensureProjectPermission(userId, projectId, 'view');
+
+    console.log(`[Workspace API] Permission check passed, fetching workspace...`);
 
     // Smart workspace management: create if missing, start if stopped
     let workspace = await daytonaManager.getProjectWorkspace(projectId);
@@ -199,6 +298,14 @@ export const getProjectWorkspace = api(
       });
 
       console.log(`[Workspace Manager] ✓ Created Daytona workspace for project ${projectId}`);
+
+      // Start sync for newly created workspace
+      try {
+        await syncManager.startSync(projectId, workspace.id);
+        console.log(`[Workspace API] Started sync for new workspace ${workspace.id}`);
+      } catch (error) {
+        console.error(`[Workspace API] Failed to start sync:`, error);
+      }
     } else if (workspace && workspace.status === 'stopped') {
       // Workspace exists but stopped - restart it with retry logic
       console.log(`[Workspace Manager] Auto-starting stopped workspace for project ${projectId}`);
@@ -308,6 +415,24 @@ export const getProjectWorkspace = api(
       }
     }
 
+    // Trigger auto-build if needed (non-blocking)
+    // This runs whenever a project is opened in the editor
+    if (workspace) {
+      console.log(`[Auto-Build] ========== AUTO-BUILD TRIGGER POINT ==========`);
+      console.log(`[Auto-Build] Project ID: ${projectId}`);
+      console.log(`[Auto-Build] Workspace ID: ${workspace.id}`);
+      console.log(`[Auto-Build] Workspace Status: ${workspace.status}`);
+      console.log(`[Auto-Build] Calling triggerAutoBuildIfNeeded()...`);
+
+      triggerAutoBuildIfNeeded(projectId, workspace.id).catch(err => {
+        console.error(`[Auto-Build] ❌ Failed to trigger auto-build:`, err);
+      });
+
+      console.log(`[Auto-Build] Auto-build trigger initiated (non-blocking)`);
+    } else {
+      console.log(`[Auto-Build] ⚠ Skipping auto-build - no workspace exists`);
+    }
+
     return { workspace };
   }
 );
@@ -362,6 +487,14 @@ export const deleteWorkspace = api(
 
     const workspace = await daytonaManager.getWorkspace(workspaceId);
     await ensureProjectPermission(userId, workspace.project_id, 'delete');
+
+    // Stop sync before deleting workspace
+    try {
+      await syncManager.stopSync(workspace.project_id);
+      console.log(`[Workspace API] Stopped sync for project ${workspace.project_id}`);
+    } catch (error) {
+      console.error(`[Workspace API] Failed to stop sync:`, error);
+    }
 
     await daytonaManager.deleteWorkspace(workspaceId);
 
@@ -574,6 +707,35 @@ export const executeCommand = api(
     }
 
     const result = await daytonaManager.executeCommand(workspaceId, req.command);
+
+    return result;
+  }
+);
+
+/**
+ * Execute AI-generated code in workspace with artifact capture
+ * Uses Daytona's codeRun API for optimized code execution
+ */
+export const codeRun = api(
+  { method: 'POST', path: '/workspace/:workspaceId/code-run' },
+  async (req: CodeRunRequest): Promise<CodeRunResponse> => {
+    const { userId } = await verifyClerkJWT(req.authorization);
+    const workspaceId = BigInt(req.workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(workspaceId);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    if (!req.code || req.code.trim().length === 0) {
+      throw toAPIError(new ValidationError('Code is required'));
+    }
+
+    const result = await daytonaManager.codeRun(
+      workspaceId,
+      req.code,
+      req.language || 'python',
+      req.argv,
+      req.env
+    );
 
     return result;
   }
@@ -797,6 +959,7 @@ export const readFile = api(
 
 /**
  * Get sandbox preview URL with authentication token
+ * Also triggers auto-build if project needs it
  */
 export const getSandboxUrl = api(
   { method: 'GET', path: '/workspace/:workspaceId/url' },
@@ -809,6 +972,11 @@ export const getSandboxUrl = api(
 
     // Sync status with Daytona API before getting URL
     workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
+
+    // Trigger auto-build if needed (non-blocking)
+    triggerAutoBuildIfNeeded(workspace.project_id, workspaceId).catch(err => {
+      console.error(`[Auto-Build] Failed to trigger auto-build:`, err);
+    });
 
     const previewInfo = await daytonaManager.getSandboxUrl(workspaceId);
 
@@ -1225,10 +1393,21 @@ export const createSshToken = api(
 import { WebSocketServer, WebSocket } from 'ws';
 import { Client } from 'ssh2';
 
-// Create WebSocket server for SSH terminal on port 4003
-const sshWss = new WebSocketServer({ port: 4003 });
-
-console.log('✓ WebSocket SSH proxy server listening on port 4003');
+// Create WebSocket server for SSH terminal on port 4003 (singleton pattern for hot reload)
+let sshWss: WebSocketServer;
+try {
+  // Check if port is already in use (from previous hot reload)
+  sshWss = new WebSocketServer({ port: 4003 });
+  console.log('✓ WebSocket SSH proxy server listening on port 4003');
+} catch (error: any) {
+  if (error.code === 'EADDRINUSE') {
+    console.log('⚠ WebSocket SSH proxy already running on port 4003 (hot reload detected)');
+    // Create a dummy server reference - the old one will handle connections
+    sshWss = new WebSocketServer({ noServer: true });
+  } else {
+    throw error;
+  }
+}
 
 sshWss.on('connection', async (ws: WebSocket, req) => {
   console.log('[SSH Terminal] New WebSocket connection received');
@@ -1459,3 +1638,70 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
 
 // Export for cleanup
 export { sshWss };
+
+/**
+ * Manual sync endpoint - force sync between VFS and Daytona
+ */
+export const syncWorkspace = api(
+  { method: 'POST', path: '/workspace/:workspaceId/sync', expose: true },
+  async ({
+    authorization,
+    workspaceId,
+    direction = 'bidirectional'
+  }: {
+    authorization: Header<'Authorization'>;
+    workspaceId: string;
+    direction?: Query<'to-daytona' | 'to-vfs' | 'bidirectional'>;
+  }): Promise<{ success: boolean; message: string }> => {
+    const { userId } = await verifyClerkJWT(authorization);
+    const id = BigInt(workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(id);
+    await ensureProjectPermission(userId, workspace.project_id, 'edit');
+
+    console.log(`[Workspace API] Manual sync requested: ${direction}`);
+
+    await syncManager.fullSync(workspace.project_id, id, direction);
+
+    return {
+      success: true,
+      message: `Sync completed: ${direction}`
+    };
+  }
+);
+
+/**
+ * Get sync status for a workspace
+ */
+export const getSyncStatus = api(
+  { method: 'GET', path: '/workspace/:workspaceId/sync-status', expose: true },
+  async ({
+    authorization,
+    workspaceId
+  }: {
+    authorization: Header<'Authorization'>;
+    workspaceId: string;
+  }): Promise<{
+    isActive: boolean;
+    lastVFSSync?: Date;
+    lastDaytonaSync?: Date;
+  }> => {
+    const { userId } = await verifyClerkJWT(authorization);
+    const id = BigInt(workspaceId);
+
+    const workspace = await daytonaManager.getWorkspace(id);
+    await ensureProjectPermission(userId, workspace.project_id, 'view');
+
+    const status = syncManager.getSyncStatus(workspace.project_id);
+
+    if (!status) {
+      return {
+        isActive: false,
+        lastVFSSync: undefined,
+        lastDaytonaSync: undefined
+      };
+    }
+
+    return status;
+  }
+);

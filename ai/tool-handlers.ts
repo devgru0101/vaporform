@@ -7,11 +7,14 @@ import { daytonaManager } from '../workspace/daytona-manager.js';
 import { db } from '../projects/db.js';
 import { createGitManager } from '../git/git-manager.js';
 import { gridfs } from '../vfs/gridfs.js';
+import { buildErrorParser, ParsedError } from './build-error-parser.js';
+import { contextManager } from './context-manager.js';
 
 export interface ToolExecutionContext {
   workspaceId: bigint;
   projectId: bigint;
   jobId: bigint;
+  iteration?: number; // Current iteration number for tracking progress
 }
 
 export interface ToolExecutionResult {
@@ -27,17 +30,37 @@ export async function executeAgentTool(
   toolUse: any,
   context: ToolExecutionContext
 ): Promise<ToolExecutionResult> {
-  const { workspaceId, projectId, jobId } = context;
+  const { workspaceId, projectId, jobId, iteration } = context;
+  const startTime = Date.now();
 
   try {
-    console.log(`[Tool Handler] Executing tool: ${toolUse.name}`);
+    console.log(`[Tool ${jobId}] ========== EXECUTING: ${toolUse.name} ==========`);
+    if (iteration !== undefined) {
+      console.log(`[Tool ${jobId}] Iteration: ${iteration}`);
+    }
+    console.log(`[Tool ${jobId}] Input:`, JSON.stringify(toolUse.input, null, 2).substring(0, 500));
 
-    // Log tool execution
-    await logToolExecution(jobId, toolUse.name, 'info', `Executing ${toolUse.name}`);
+    // Log tool execution start with input metadata
+    await logToolExecution(
+      jobId,
+      toolUse.name,
+      'info',
+      `Executing ${toolUse.name}`,
+      {
+        phase: 'start',
+        iteration: iteration,
+        input: toolUse.input,
+        timestamp: new Date().toISOString()
+      }
+    );
 
     let result: any;
 
     switch (toolUse.name) {
+      case 'initialize_project_environment':
+        result = await handleInitializeProjectEnvironment(toolUse.input, projectId, jobId);
+        break;
+
       case 'write_to_file':
         result = await handleWriteFile(toolUse.input, workspaceId, projectId, jobId);
         break;
@@ -163,29 +186,173 @@ export async function executeAgentTool(
         throw new Error(`Unknown tool: ${toolUse.name}`);
     }
 
+    // Calculate duration
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+
+    // Log success with detailed metadata
     await logToolExecution(
       jobId,
       toolUse.name,
       'info',
-      `Successfully executed ${toolUse.name}`,
-      result
+      `Successfully executed ${toolUse.name} in ${duration}s`,
+      {
+        phase: 'complete',
+        iteration: iteration,
+        duration_seconds: parseFloat(duration),
+        output: result,
+        success: true,
+        timestamp: new Date().toISOString()
+      }
     );
+
+    console.log(`[Tool ${jobId}] ✓ ${toolUse.name} completed in ${duration}s`);
+    const resultPreview = JSON.stringify(result, null, 2).substring(0, 500);
+    console.log(`[Tool ${jobId}] Result:`, resultPreview + (JSON.stringify(result).length > 500 ? '...' : ''));
 
     return {
       success: true,
       result
     };
   } catch (error) {
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`[Tool Handler] Error executing ${toolUse.name}:`, errorMsg);
+    const errorStack = error instanceof Error ? error.stack : undefined;
 
-    await logToolExecution(jobId, toolUse.name, 'error', errorMsg);
+    console.error(`[Tool ${jobId}] ✗ ${toolUse.name} failed after ${duration}s`);
+    console.error(`[Tool ${jobId}] Error:`, errorMsg);
+    if (errorStack) {
+      console.error(`[Tool ${jobId}] Stack trace:`, errorStack);
+    }
+
+    // Log error with detailed metadata
+    await logToolExecution(
+      jobId,
+      toolUse.name,
+      'error',
+      `${toolUse.name} failed: ${errorMsg}`,
+      {
+        phase: 'error',
+        iteration: iteration,
+        duration_seconds: parseFloat(duration),
+        error_message: errorMsg,
+        error_stack: errorStack,
+        input: toolUse.input,
+        success: false,
+        timestamp: new Date().toISOString()
+      }
+    );
 
     return {
       success: false,
       error: errorMsg
     };
   }
+}
+
+/**
+ * Initialize project environment for YOLO mode
+ * Creates workspace with AI-detected language
+ */
+async function handleInitializeProjectEnvironment(
+  input: { language: string; framework?: string; project_type: string; reasoning: string },
+  projectId: bigint,
+  jobId: bigint
+): Promise<any> {
+  const { language, framework, project_type, reasoning } = input;
+
+  console.log(`[INIT] ========== Initializing Project Environment ==========`);
+  console.log(`[INIT] Project ID: ${projectId}`);
+  console.log(`[INIT] Language: ${language}`);
+  console.log(`[INIT] Framework: ${framework || 'none'}`);
+  console.log(`[INIT] Project Type: ${project_type}`);
+  console.log(`[INIT] Reasoning: ${reasoning}`);
+
+  // Get project details
+  const project = await db.queryRow<{ id: bigint; name: string; description: string }>`
+    SELECT id, name, description
+    FROM projects
+    WHERE id = ${projectId}
+  `;
+
+  if (!project) {
+    throw new Error(`Project ${projectId} not found`);
+  }
+
+  // Create workspace with detected language
+  console.log(`[INIT] Creating workspace with language: ${language}`);
+
+  const workspace = await daytonaManager.createWorkspace(
+    projectId,
+    `${project.name} Workspace`,
+    {
+      language: language,
+      environment: {
+        PROJECT_ID: projectId.toString(),
+        PROJECT_NAME: project.name,
+        PROJECT_TYPE: project_type,
+        FRAMEWORK: framework || '',
+      },
+      autoStopInterval: 60,
+      autoArchiveInterval: 24 * 60,
+      ephemeral: false,
+    }
+  );
+
+  console.log(`[INIT] ✓ Workspace created: ${workspace.id}`);
+
+  // Update project record with workspace ID and metadata
+  await db.exec`
+    UPDATE projects
+    SET
+      daytona_workspace_id = ${workspace.id},
+      wizard_data = ${JSON.stringify({
+        creationType: 'yolo',
+        detectedLanguage: language,
+        detectedFramework: framework,
+        projectType: project_type,
+        initializationReasoning: reasoning
+      })}
+    WHERE id = ${projectId}
+  `;
+
+  console.log(`[INIT] ✓ Project record updated with workspace ID`);
+
+  // Create initial README
+  const readmeContent = `# ${project.name}\n\n${project.description || 'Built with Vaporform YOLO mode'}\n\n**Language:** ${language}${framework ? `\n**Framework:** ${framework}` : ''}\n**Type:** ${project_type}\n\n## Getting Started\n\nYour ${language} environment is ready! Start building.\n\n**AI Detection Reasoning:** ${reasoning}\n`;
+
+  await gridfs.writeFile(
+    projectId,
+    '/README.md',
+    Buffer.from(readmeContent, 'utf-8'),
+    'text/markdown'
+  );
+
+  console.log(`[INIT] ✓ Created README.md`);
+
+  // Log to generation logs
+  await logToolExecution(
+    jobId,
+    'initialize_project_environment',
+    'info',
+    `Environment initialized: ${language}${framework ? ` (${framework})` : ''}`,
+    {
+      language,
+      framework,
+      project_type,
+      workspace_id: workspace.id.toString()
+    }
+  );
+
+  console.log(`[INIT] ========== Initialization Complete ==========`);
+
+  return {
+    success: true,
+    message: `✅ Environment initialized! Created ${language} workspace${framework ? ` with ${framework}` : ''}. Ready to build your ${project_type}.`,
+    workspace_id: workspace.id.toString(),
+    language,
+    framework,
+    project_type
+  };
 }
 
 /**
@@ -303,18 +470,110 @@ async function handleExecuteCommand(
 ): Promise<any> {
   const { command, cwd } = input;
 
+  const startTime = Date.now();
+
   // Execute command in workspace
   const result = await daytonaManager.executeCommand(workspaceId, command);
 
+  const duration = Date.now() - startTime;
+
   // Update progress
   await updateJobProgress(jobId, `Executed: ${command}`);
+
+  // Detect build/test commands
+  const isBuildCommand = /npm (run )?build|npm test|yarn build|yarn test|pnpm build|pnpm test|cargo build|cargo test|go build|go test|mvn compile|mvn test|gradle build|gradle test|pytest|python -m pytest/.test(command);
+
+  // If build/test command failed, parse errors
+  if (isBuildCommand && result.exitCode !== 0) {
+    console.log(`[Execute Command] Build/test failed, parsing errors...`);
+
+    const output = result.stdout + '\n' + result.stderr;
+
+    // Detect language from command
+    let language: string | undefined;
+    if (command.includes('npm') || command.includes('yarn') || command.includes('pnpm') || command.includes('tsc')) {
+      language = 'typescript';
+    } else if (command.includes('pytest') || command.includes('python')) {
+      language = 'python';
+    } else if (command.includes('cargo')) {
+      language = 'rust';
+    } else if (command.includes('go build') || command.includes('go test')) {
+      language = 'go';
+    } else if (command.includes('mvn') || command.includes('gradle') || command.includes('javac')) {
+      language = 'java';
+    }
+
+    // Parse errors
+    const parsedErrors = buildErrorParser.parseErrors(output, language);
+
+    console.log(`[Execute Command] Parsed ${parsedErrors.length} errors`);
+
+    // Add errors to context for agent to see
+    if (parsedErrors.length > 0) {
+      try {
+        const workspace = await daytonaManager.getWorkspace(workspaceId);
+
+        await contextManager.upsertContextItem(
+          workspace.project_id,
+          'build_errors',
+          `build_${Date.now()}`,
+          JSON.stringify({
+            command,
+            errors: parsedErrors,
+            timestamp: new Date().toISOString()
+          }),
+          {
+            command,
+            errorCount: parsedErrors.length,
+            language
+          }
+        );
+      } catch (error) {
+        console.error('[Execute Command] Failed to save build errors to context:', error);
+      }
+    }
+
+    await logToolExecution(
+      jobId,
+      'execute_command',
+      'error',
+      `Build failed with ${parsedErrors.length} ${parsedErrors.length === 1 ? 'error' : 'errors'}`,
+      {
+        command,
+        exitCode: result.exitCode,
+        errorCount: parsedErrors.length,
+        duration
+      }
+    );
+
+    return {
+      command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      success: false,
+      duration,
+      parsedErrors, // Include parsed errors in response
+      errorSummary: parsedErrors.length > 0
+        ? `Found ${parsedErrors.length} ${parsedErrors[0].severity === 'error' ? 'errors' : 'warnings'}. First: ${parsedErrors[0].file}:${parsedErrors[0].line} - ${parsedErrors[0].message}${parsedErrors[0].suggestion ? `\n💡 ${parsedErrors[0].suggestion}` : ''}`
+        : 'Build failed with no parseable errors'
+    };
+  }
+
+  // Successful execution or non-build command
+  await logToolExecution(jobId, 'execute_command', 'info', `Completed: ${command}`, {
+    command,
+    exitCode: result.exitCode,
+    duration
+  });
 
   return {
     command,
     stdout: result.stdout,
     stderr: result.stderr,
     exitCode: result.exitCode,
-    success: result.exitCode === 0
+    success: result.exitCode === 0,
+    duration
   };
 }
 
@@ -749,28 +1008,37 @@ async function logToolExecution(
 /**
  * Parse progress from tool executions
  * Estimates progress based on typical project generation phases
+ * IMPROVED: Removed 95% cap, added phase-based progress, more granular tracking
  */
 export function estimateProgress(toolExecutions: any[]): number {
   const writeFileCount = toolExecutions.filter(t => t.tool_name === 'write_to_file').length;
   const executeCommandCount = toolExecutions.filter(t => t.tool_name === 'execute_command').length;
+  const readFileCount = toolExecutions.filter(t => t.tool_name === 'read_file').length;
+  const listFilesCount = toolExecutions.filter(t => t.tool_name === 'list_files').length;
   const completionAttempt = toolExecutions.some(t => t.tool_name === 'attempt_completion');
 
   if (completionAttempt) return 100;
 
-  // Rough estimation:
-  // - Each file write contributes to progress
-  // - Commands (npm install, build) are major milestones
-  // - Cap at 95% until completion is called
+  // Phase-based progress estimation
+  let progress = 15; // Base progress (workspace created, generating started)
 
-  let progress = 0;
+  // File writes: 0-50 points (most of the work)
+  // Typical project has 10-30 files, so scale accordingly
+  const fileProgress = Math.min(writeFileCount * 2, 50);
+  progress += fileProgress;
 
-  // File writes: up to 60% of progress
-  progress += Math.min(writeFileCount * 3, 60);
+  // Command executions: 0-30 points (npm install, build, etc.)
+  // Commands are major milestones
+  const commandProgress = Math.min(executeCommandCount * 5, 30);
+  progress += commandProgress;
 
-  // Command executions: up to 30% of progress
-  progress += Math.min(executeCommandCount * 10, 30);
+  // File reads and lists: 0-10 points (investigation phase)
+  const investigationProgress = Math.min((readFileCount + listFilesCount) * 0.5, 10);
+  progress += investigationProgress;
 
-  return Math.min(progress, 95);
+  // Cap at 98% if not completed (removed 95% cap)
+  // This allows progress to reach high numbers but still shows completion is separate
+  return Math.min(progress, 98);
 }
 
 /**
@@ -2324,5 +2592,134 @@ async function detectPackageManager(workspaceId: bigint, projectId: bigint): Pro
     return 'npm'; // Default to npm
   } catch {
     return 'npm'; // Default to npm on error
+  }
+}
+
+/**
+ * Execute agent tool for chat agent (without job ID)
+ * This is a wrapper around executeAgentTool that fetches workspace automatically
+ */
+export async function executeAgentToolForChat(
+  toolName: string,
+  toolInput: any,
+  context: {
+    projectId: bigint;
+    workspaceId: bigint;
+    userId: string;
+  }
+): Promise<any> {
+  const { projectId, userId } = context;
+
+  // Get or create workspace for this project (use internal daytonaManager, not API endpoint)
+  let workspace = await daytonaManager.getProjectWorkspace(projectId);
+
+  // If no workspace, create one using internal daytonaManager (not API endpoint)
+  if (!workspace) {
+    console.log(`[Tool Chat] No workspace found for project ${projectId}, creating one...`);
+
+    // Get project to determine language
+    const projectRow = await db.queryRow`
+      SELECT * FROM projects WHERE id = ${projectId} AND deleted_at IS NULL
+    `;
+
+    if (!projectRow) {
+      throw new Error('Project not found');
+    }
+
+    const language = projectRow.language || 'typescript';
+    const workspaceName = `${projectRow.name}-workspace`;
+
+    // Use daytonaManager.createWorkspace (internal function, not API endpoint)
+    workspace = await daytonaManager.createWorkspace(projectId, workspaceName, {
+      language: language as 'typescript' | 'python' | 'javascript' | 'go' | 'rust' | 'java' | 'php' | 'ruby',
+      environment: {
+        PROJECT_ID: projectId.toString(),
+        PROJECT_NAME: projectRow.name || 'Unnamed Project',
+      },
+    });
+  }
+
+  const workspaceId = workspace.id;
+
+  // Route to appropriate handler based on tool name
+  // Most tools from AGENT_TOOLS and DAYTONA_TOOLS
+  switch (toolName) {
+    case 'read_file':
+      return await handleReadFile(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'write_to_file':
+      return await handleWriteFile(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'edit_file':
+      return await handleEditFile(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'list_files':
+      return await handleListFiles(toolInput, workspaceId, BigInt(0));
+
+    case 'search_files':
+      return await handleSearchFiles(toolInput, workspaceId, BigInt(0));
+
+    case 'execute_command':
+      return await handleExecuteCommand(toolInput, workspaceId, BigInt(0));
+
+    case 'run_code':
+      return await handleCodeRun(toolInput, workspaceId, BigInt(0));
+
+    case 'git_status':
+      return await handleGitStatus(toolInput, projectId, BigInt(0));
+
+    case 'git_commit':
+      return await handleGitCommit(toolInput, projectId, BigInt(0));
+
+    case 'git_log':
+      return await handleGitLog(toolInput, projectId, BigInt(0));
+
+    case 'git_diff':
+      return await handleGitDiff(toolInput, projectId, BigInt(0));
+
+    case 'install_package':
+      return await handleInstallPackage(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'remove_package':
+      return await handleRemovePackage(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'daytona_execute_command':
+      return await handleDaytonaExecuteCommand(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_read_file':
+      return await handleDaytonaReadFile(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_write_file':
+      return await handleDaytonaWriteFile(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_list_files':
+      return await handleDaytonaListFiles(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_get_preview_url':
+      return await handleDaytonaGetPreviewUrl(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_git_clone':
+      return await handleDaytonaGitClone(toolInput, workspaceId, BigInt(0));
+
+    case 'daytona_get_workspace_status':
+      return await handleDaytonaGetWorkspaceStatus(toolInput, workspaceId, BigInt(0));
+
+    case 'ensure_workspace_running':
+      return await handleEnsureWorkspaceRunning(toolInput, workspaceId, BigInt(0));
+
+    case 'restart_workspace':
+      return await handleRestartWorkspace(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'force_rebuild_workspace':
+      return await handleForceRebuildWorkspace(toolInput, workspaceId, projectId, BigInt(0));
+
+    case 'ask_followup_question':
+      return await handleAskFollowup(toolInput, BigInt(0));
+
+    case 'attempt_completion':
+      return await handleAttemptCompletion(toolInput, workspaceId, projectId, BigInt(0));
+
+    default:
+      throw new Error(`Unknown tool: ${toolName}`);
   }
 }
