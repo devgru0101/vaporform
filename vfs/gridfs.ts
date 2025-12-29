@@ -24,22 +24,48 @@ export class GridFS {
 
   /**
    * Initialize MongoDB connection and GridFS bucket
+   * 
+   * DEVELOPMENT CONFIGURATION:
+   * MongoDB/GridFS is made OPTIONAL for local development to allow the backend to start
+   * without requiring a full MongoDB setup. This is useful for:
+   * 
+   * - Initial development and testing of non-file-related features
+   * - Remote development environments where MongoDB may not be available
+   * - CI/CD pipelines that don't require file storage
+   * 
+   * When MongoDBURI is not configured:
+   * - The backend will start successfully with warnings
+   * - File operations (upload, download, list) will fail gracefully
+   * - All other features (projects, workspaces, AI agent) continue to work
+   * 
+   * For production or full-featured development, configure MongoDBURI in .secrets.local.cue
+   * Example: MongoDBURI: "mongodb://localhost:27017/vaporform"
    */
   async connect(): Promise<void> {
     if (this.client) return;
 
-    const uri = mongoDBURI();
+    try {
+      const uri = mongoDBURI();
+      if (!uri) {
+        console.warn('⚠️  MongoDB URI not configured - GridFS file storage disabled');
+        console.warn('   File operations will fail until MongoDB is configured.');
+        return; // Continue without MongoDB
+      }
 
-    this.client = new MongoClient(uri);
-    await this.client.connect();
+      this.client = new MongoClient(uri);
+      await this.client.connect();
 
-    const database = this.client.db('vaporform');
-    this.bucket = new GridFSBucket(database, {
-      bucketName: 'project_files',
-      chunkSizeBytes: 255 * 1024, // 255KB chunks
-    });
+      const database = this.client.db('vaporform');
+      this.bucket = new GridFSBucket(database, {
+        bucketName: 'project_files',
+        chunkSizeBytes: 255 * 1024, // 255KB chunks
+      });
 
-    console.log('✓ Connected to MongoDB GridFS');
+      console.log('✓ Connected to MongoDB GridFS');
+    } catch (error) {
+      console.warn('⚠️  Failed to connect to MongoDB GridFS:', error instanceof Error ? error.message : String(error));
+      console.warn('   File operations will be disabled. Configure MongoDBURI secret to enable.');
+    }
   }
 
   /**
@@ -182,6 +208,30 @@ export class GridFS {
     });
 
     return Buffer.concat(chunks);
+  }
+
+  /**
+   * Read a file from GridFS as a stream
+   */
+  async readFileStream(projectId: bigint, path: string): Promise<Readable> {
+    const bucket = this.ensureConnected();
+    const normalizedPath = normalizePath(path);
+
+    // Get metadata
+    const metadata = await db.queryRow<FileMetadata>`
+      SELECT * FROM file_metadata
+      WHERE project_id = ${projectId}
+      AND path = ${normalizedPath}
+      AND deleted_at IS NULL
+      AND is_directory = false
+    `;
+
+    if (!metadata) {
+      throw new NotFoundError(`File not found: ${normalizedPath}`);
+    }
+
+    // Return download stream
+    return bucket.openDownloadStream(new ObjectId(metadata.gridfs_file_id));
   }
 
   /**

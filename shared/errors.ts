@@ -37,9 +37,12 @@ export class NotFoundError extends VaporformError {
 }
 
 export class ValidationError extends VaporformError {
-  constructor(message: string) {
+  public details?: any;
+
+  constructor(message: string, details?: any) {
     super('VALIDATION_ERROR', message, 400);
     this.name = 'ValidationError';
+    this.details = details;
   }
 }
 

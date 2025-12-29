@@ -10,8 +10,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { contextManager } from './context-manager.js';
-import { terminalAgentTools } from './terminal-agent-tools.js';
+import { toolRegistry } from './core/registry.js';
 import { getUserAnthropicKey } from '../users/secrets.js';
+import { mem0Manager } from './memory/mem0-manager.js';
 
 // Define Anthropic API key secret
 const anthropicAPIKey = secret("AnthropicAPIKey");
@@ -89,8 +90,12 @@ export const terminalAgentChat = api(
 
     const anthropic = new Anthropic({ apiKey });
 
-    // Build system prompt with cross-agent context
-    const systemPrompt = await buildTerminalAgentPrompt(req.projectId, req.workspaceId);
+    // Build system prompt with cross-agent context and memory retrieval
+    const systemPrompt = await buildTerminalAgentPrompt(req.projectId, req.workspaceId, req.message, userId);
+
+    // Save user message to persistent memory (fire and forget)
+    mem0Manager.addMemory(userId, req.message, { role: 'user', projectId: String(req.projectId), agent: 'terminal' })
+      .catch(err => console.error('[Terminal Agent] Failed to save user memory:', err));
 
     // Get conversation history
     const history = await contextManager.getMessages(sessionId);
@@ -195,7 +200,7 @@ export const terminalAgentChat = api(
       max_tokens: 8192,
       system: systemPrompt,
       messages,
-      tools: terminalAgentTools.getToolDefinitions()
+      tools: toolRegistry.getDefinitions()
     });
 
     let finalResponse = '';
@@ -214,7 +219,7 @@ export const terminalAgentChat = api(
 
           try {
             // Execute tool
-            const toolResult = await terminalAgentTools.executeTool(
+            const toolResult = await toolRegistry.execute(
               block.name,
               block.input,
               {
@@ -359,7 +364,7 @@ export const terminalAgentChat = api(
         max_tokens: 8192,
         system: systemPrompt,
         messages,
-        tools: terminalAgentTools.getToolDefinitions()
+        tools: toolRegistry.getDefinitions()
       });
     }
 
@@ -371,6 +376,12 @@ export const terminalAgentChat = api(
         iterations
       }
     });
+
+    // Save assistant response to persistent memory (fire and forget)
+    if (finalResponse && finalResponse.trim().length > 0) {
+      mem0Manager.addMemory(userId, finalResponse, { role: 'assistant', projectId: String(req.projectId), agent: 'terminal' })
+        .catch(err => console.error('[Terminal Agent] Failed to save assistant memory:', err));
+    }
 
     console.log(`[Terminal Agent] Completed after ${iterations} iterations, ${toolsUsed.length} tools used`);
 
@@ -396,7 +407,9 @@ export const terminalAgentChat = api(
  */
 async function buildTerminalAgentPrompt(
   projectId: bigint,
-  workspaceId?: bigint
+  workspaceId?: bigint,
+  userMessage?: string,
+  userId?: string
 ): Promise<string> {
   // Get cross-agent context
   const crossContext = await contextManager.getCrossAgentContext(projectId);
@@ -404,17 +417,26 @@ async function buildTerminalAgentPrompt(
   // Get RAG results for recent activity
   const { qdrantManager } = await import('../vector/qdrant-manager.js');
   let ragResults: any[] = [];
+  let userMemories: string[] = [];
 
   try {
-    ragResults = await qdrantManager.search(
-      projectId,
-      'code',
-      'recent terminal activity commands errors',
-      3,
-      0.6
-    );
+    // Parallel fetch for RAG and Memories
+    const results = await Promise.allSettled([
+      qdrantManager.search(
+        projectId,
+        'code',
+        'recent terminal activity commands errors',
+        3,
+        0.6
+      ),
+      userId && userMessage ? mem0Manager.searchMemory(userId, userMessage, 5) : Promise.resolve([])
+    ]);
+
+    if (results[0].status === 'fulfilled') ragResults = results[0].value;
+    if (results[1].status === 'fulfilled') userMemories = results[1].value;
+
   } catch (error) {
-    console.warn('[Terminal Agent] Could not fetch RAG results:', error);
+    console.warn('[Terminal Agent] Could not fetch context:', error);
   }
 
   return `You are an AI-powered terminal assistant integrated into Vaporform, a cloud-based development platform.
@@ -423,13 +445,11 @@ async function buildTerminalAgentPrompt(
 
 You have access to powerful tools for terminal operations, file management, and code analysis:
 
-1. **bash** - Execute bash commands in the project workspace
+1. **execute_command** - Execute bash commands (replaces bash)
 2. **read_file** - Read file contents
 3. **write_file** - Write content to files
 4. **edit_file** - Make targeted edits to files
-5. **glob** - Find files by pattern
-6. **grep** - Search file contents
-7. **ls** - List directory contents
+5. **memory** - Store and recall information
 
 # Environment Context
 
@@ -444,23 +464,23 @@ You share context with the code generation agent. Here's what else is happening 
 
 ## Recent Code Generation Activity
 ${crossContext.recentCodeActivity.length > 0 ? crossContext.recentCodeActivity.slice(0, 5).map(msg =>
-  `- [${msg.created_at.toISOString()}] ${msg.role}: ${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}`
-).join('\n') : 'No recent code generation activity'}
+    `- [${msg.created_at.toISOString()}] ${msg.role}: ${msg.content.substring(0, 200)}${msg.content.length > 200 ? '...' : ''}`
+  ).join('\n') : 'No recent code generation activity'}
 
 ## Recent Errors
 ${crossContext.sharedErrors.length > 0 ? crossContext.sharedErrors.slice(0, 3).map(err =>
-  `- ${err.item_key}: ${err.content.substring(0, 150)}`
-).join('\n') : 'No recent errors'}
+    `- ${err.item_key}: ${err.content.substring(0, 150)}`
+  ).join('\n') : 'No recent errors'}
 
 ## Active Jobs
 ${crossContext.activeJobs.length > 0 ? crossContext.activeJobs.map(job =>
-  `- ${job.job_type}: ${job.description || 'N/A'} (${job.status}, ${job.progress_percentage}%)`
-).join('\n') : 'No active jobs'}
+    `- ${job.job_type}: ${job.description || 'N/A'} (${job.status}, ${job.progress_percentage}%)`
+  ).join('\n') : 'No active jobs'}
 
 ## Recently Modified Files
 ${crossContext.sharedFiles.length > 0 ? crossContext.sharedFiles.slice(0, 10).map(file =>
-  `- ${file.item_key} (accessed ${file.access_count} times)`
-).join('\n') : 'No recently modified files'}
+    `- ${file.item_key} (accessed ${file.access_count} times)`
+  ).join('\n') : 'No recently modified files'}
 
 ${ragResults.length > 0 ? `
 ## Relevant Code Context (from semantic search)
@@ -473,6 +493,12 @@ ${r.content.substring(0, 500)}${r.content.length > 500 ? '...' : ''}
 `).join('\n')}
 ` : ''}
 
+${userMemories.length > 0 ? `
+## Relevant Memories (Persistent Memory)
+The following memories were retrieved based on the user's current request:
+${userMemories.map(m => `- ${m}`).join('\n')}
+` : ''}
+
 # Guidelines
 
 1. **Be Proactive**: Use your tools to gather information before answering
@@ -480,6 +506,7 @@ ${r.content.substring(0, 500)}${r.content.length > 500 ? '...' : ''}
 3. **Safe Execution**: Always explain what commands will do before running destructive operations
 4. **Efficient**: Use the right tool for the job (grep for searching, glob for finding files, etc.)
 5. **Collaborative**: You're working alongside the code generation agent - be aware of its recent actions
+6. **Memory-Usage**: Use the 'memory' tool to verify or update stored information if you learn something new and important.
 
 # Response Style
 

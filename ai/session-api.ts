@@ -173,6 +173,7 @@ export const listSessions = api(
   { method: 'GET', path: '/ai/projects/:projectId/sessions' },
   async (req: ListSessionsRequest): Promise<ListSessionsResponse> => {
     try {
+      console.log(`[Session API] listSessions called for project ${req.projectId}`);
       const { userId } = await verifyClerkJWT(req.authorization);
       const projectId = BigInt(req.projectId);
 
@@ -219,6 +220,7 @@ export const listSessions = api(
         });
       }
 
+      console.log(`[Session API] listSessions found ${sessions.length} sessions`);
       return { sessions };
     } catch (error) {
       console.error('Error listing sessions:', error);
@@ -367,6 +369,7 @@ export const getMessages = api(
   { method: 'GET', path: '/ai/sessions/:sessionId/messages' },
   async (req: GetMessagesRequest): Promise<GetMessagesResponse> => {
     try {
+      console.log(`[Session API] getMessages called for session ${req.sessionId}`);
       const { userId } = await verifyClerkJWT(req.authorization);
       const sessionId = BigInt(req.sessionId);
       const limit = req.limit ? parseInt(req.limit) : 100;
@@ -433,6 +436,7 @@ export const getMessages = api(
         });
       }
 
+      console.log(`[Session API] getMessages returning ${messages.length} messages`);
       return { messages };
     } catch (error) {
       console.error('Error getting messages:', error);

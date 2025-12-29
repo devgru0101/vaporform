@@ -7,8 +7,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { secret } from 'encore.dev/config';
 import { daytonaManager } from '../workspace/daytona-manager.js';
 import { db } from '../projects/db.js';
-import { buildProjectGenerationPrompt, type WizardData } from './prompt-templates.js';
-import { executeAgentTool, estimateProgress } from './tool-handlers.js';
+import { buildProjectGenerationPrompt } from './prompt-templates.js';
+import type { WizardData } from '../shared/types.js';
+import { executeAgentTool } from './tool-handlers.js';
+import { estimateProgress } from './tool-utils.js';
 
 // Define Anthropic API key secret
 const anthropicAPIKey = secret("AnthropicAPIKey");
@@ -98,16 +100,27 @@ async function runGeneration(
     // Phase 1: Check for existing workspace or create new one
     let workspace = await daytonaManager.getProjectWorkspace(projectId);
 
+
+    // Helper to determine image based on template
+    const getWorkspaceImage = (template: string): string => {
+      if (template.includes('go') || template.includes('vue')) return 'golang:latest';
+      if (template.includes('python') || template.includes('django') || template.includes('flask')) return 'python:3.11-slim';
+      return 'node:20-alpine';
+    };
+
     if (!workspace) {
       console.log(`[Generator] Creating new Daytona workspace for project ${projectId}`);
       await updateJobStatus(jobId, 'creating_workspace', 5, 'Creating development workspace');
+
+      const template = wizardData.techStack.selectedTemplate || 'encore-react';
+      const image = getWorkspaceImage(template);
 
       workspace = await daytonaManager.createWorkspace(
         projectId,
         `workspace-${projectId}`,
         {
-          language: 'typescript',
-          image: 'node:20-alpine',
+          language: 'typescript', // Default language metadata, actual env depends on image
+          image: image,
           ephemeral: false,
           autoStopInterval: 3600, // 1 hour
         }
@@ -145,7 +158,7 @@ async function runGeneration(
     console.log(`[Generator] Ensuring workspace is ready for code generation...`);
     await updateJobStatus(jobId, 'preparing_workspace', 8, 'Waiting for workspace to be ready');
 
-    const MAX_WAIT_SECONDS = 60;
+    const MAX_WAIT_SECONDS = 300; // Increased to 5 minutes
     const POLL_INTERVAL_MS = 2000; // Poll every 2 seconds
     const maxAttempts = Math.floor((MAX_WAIT_SECONDS * 1000) / POLL_INTERVAL_MS);
     let attempts = 0;
@@ -165,7 +178,9 @@ async function runGeneration(
       }
 
       attempts++;
-      console.log(`[Generator] Workspace status: ${currentWorkspace.status}, waiting... (${attempts}/${maxAttempts})`);
+      if (attempts % 5 === 0) {
+        console.log(`[Generator] Workspace status: ${currentWorkspace.status}, waiting... (${attempts}/${maxAttempts})`);
+      }
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
     }
 

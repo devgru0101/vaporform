@@ -3,26 +3,9 @@
  * Converts wizard data into comprehensive AI prompts
  */
 
-export interface WizardData {
-  vision: {
-    name: string;
-    description: string;
-    coreFeatures: string;
-    targetAudience: string;
-    projectGoals: string[];
-    inspirationApps: string[];
-  };
-  techStack: {
-    selectedTemplate: string;
-    backend?: string;
-    frontend?: string;
-    database?: string;
-  };
-  integrations: Record<string, {
-    provider: string;
-    config: Record<string, string>;
-  }>;
-}
+import type { WizardData } from '../shared/types.js';
+
+export { WizardData };
 
 const TEMPLATE_CONFIGS = {
   'encore-react': {
@@ -83,7 +66,7 @@ ${wizardData.vision.coreFeatures}
 ${wizardData.vision.targetAudience ? `**Target Audience**: ${wizardData.vision.targetAudience}\n` : ''}
 
 ${wizardData.vision.projectGoals.length > 0 ? `**Project Goals**:
-${wizardData.vision.projectGoals.map((goal, i) => `${i + 1}. ${goal}`).join('\n')}
+${wizardData.vision.projectGoals.map((goal: string, i: number) => `${i + 1}. ${goal}`).join('\n')}
 ` : ''}
 
 ${wizardData.vision.inspirationApps.length > 0 ? `**Inspiration**:
@@ -338,13 +321,23 @@ function getIntegrationImplementationSteps(integrations: Record<string, any>): s
     const provider = integration.provider;
 
     if (category === 'authentication') {
-      steps.push(`- Implement ${provider} authentication flow`);
-      steps.push(`- Create auth middleware and protected routes`);
-      steps.push(`- Add login/logout UI components`);
+      if (provider.toLowerCase().includes('clerk')) {
+        steps.push(`- Install @clerk/clerk-sdk-node and frontend SDK`);
+        steps.push(`- wrapping App with <ClerkProvider>`);
+        steps.push(`- Add <SignIn> and <SignUp> components`);
+      } else {
+        steps.push(`- Implement ${provider} authentication flow`);
+        steps.push(`- Create auth middleware and protected routes`);
+      }
     } else if (category === 'payments') {
-      steps.push(`- Integrate ${provider} SDK`);
-      steps.push(`- Create payment processing endpoints`);
-      steps.push(`- Add checkout UI components`);
+      if (provider.toLowerCase().includes('stripe')) {
+        steps.push(`- Install stripe and @stripe/stripe-js`);
+        steps.push(`- Create webhook handler for payment events`);
+        steps.push(`- Implement Checkout Session creation endpoint`);
+      } else {
+        steps.push(`- Integrate ${provider} SDK`);
+        steps.push(`- Create payment processing endpoints`);
+      }
     } else if (category === 'analytics') {
       steps.push(`- Add ${provider} tracking code`);
       steps.push(`- Set up event tracking for key user actions`);

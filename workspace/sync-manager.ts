@@ -6,6 +6,21 @@
 import { gridfs } from '../vfs/gridfs.js';
 import { daytonaManager } from './daytona-manager.js';
 import { db } from './daytona-manager.js';
+import { escapeShellArg } from '../shared/validation.js';
+import { TIMEOUTS, RETRY } from '../shared/config.js';
+
+// Graceful shutdown handling
+process.on('SIGTERM', () => {
+  console.log('[Sync Manager] SIGTERM received, cleaning up...');
+  syncManager.cleanup();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('[Sync Manager] SIGINT received, cleaning up...');
+  syncManager.cleanup();
+  process.exit(0);
+});
 
 interface SyncState {
   projectId: bigint;
@@ -19,8 +34,8 @@ interface SyncState {
 
 export class SyncManager {
   private syncStates = new Map<string, SyncState>();
-  private readonly SYNC_INTERVAL_MS = 5000; // 5 seconds
-  private readonly DEBOUNCE_MS = 1000; // 1 second debounce
+  private readonly SYNC_INTERVAL_MS = TIMEOUTS.SYNC_INTERVAL;
+  private readonly DEBOUNCE_MS = TIMEOUTS.SYNC_DEBOUNCE;
 
   /**
    * Wait for workspace to have a Daytona sandbox ID with exponential backoff
@@ -174,7 +189,7 @@ export class SyncManager {
    */
   private async syncVFSToDaytona(state: SyncState): Promise<void> {
     // Get files modified since last sync
-    const changedFiles = await db.query<{ path: string; updated_at: Date }>`
+    const changedFilesIterator = db.query<{ path: string; updated_at: Date }>`
       SELECT path, updated_at
       FROM file_metadata
       WHERE project_id = ${state.projectId}
@@ -184,38 +199,33 @@ export class SyncManager {
       ORDER BY updated_at ASC
     `;
 
-    if (changedFiles.length === 0) {
-      return;
-    }
-
-    console.log(`[Sync Manager] VFS→Daytona: ${changedFiles.length} files changed`);
-
-    const workspace = await daytonaManager.getWorkspace(state.workspaceId);
-    if (!workspace.daytona_sandbox_id) {
-      console.warn(`[Sync Manager] No Daytona sandbox for workspace ${state.workspaceId}`);
-      return;
-    }
-
-    const sandbox = await daytonaManager.getSandbox(workspace.daytona_sandbox_id);
-
-    for (const row of changedFiles) {
+    let count = 0;
+    for await (const row of changedFilesIterator) {
+      count++;
+      // Process row...
       try {
         const content = await gridfs.readFile(state.projectId, row.path);
 
-        // Ensure parent directory exists
+        // Ensure parent directory exists (using process exec via daytonaManager if needed, or skip)
+        // daytonaManager.executeCommand returns { exitCode, stdout, stderr }
         const parentDir = row.path.substring(0, row.path.lastIndexOf('/'));
         if (parentDir && parentDir !== '') {
-          await sandbox.process.executeCommand(`mkdir -p "${parentDir}"`);
+          await daytonaManager.executeCommand(state.workspaceId, `mkdir -p "${parentDir}"`);
         }
 
-        // Write file to Daytona
+        // Write file using daytonaManager
         const relativePath = row.path.startsWith('/') ? row.path.substring(1) : row.path;
-        await sandbox.fs.writeFile(relativePath, content);
+        const stringContent = content.toString('utf-8');
+        await daytonaManager.writeFile(state.workspaceId, relativePath, stringContent);
 
         console.log(`[Sync Manager] ✓ VFS→Daytona: ${row.path}`);
       } catch (error) {
         console.error(`[Sync Manager] ✗ Failed to sync ${row.path}:`, error);
       }
+    }
+
+    if (count > 0) {
+      console.log(`[Sync Manager] VFS→Daytona: ${count} files changed`);
     }
 
     // Update last sync time
@@ -232,20 +242,23 @@ export class SyncManager {
         return;
       }
 
-      const sandbox = await daytonaManager.getSandbox(workspace.daytona_sandbox_id);
+      // No need to get sandbox directly, we use daytonaManager wrappers now
 
       // Create marker file if it doesn't exist
       const markerPath = '/tmp/vaporform_sync_marker';
       try {
-        await sandbox.fs.readFile(markerPath);
+        await daytonaManager.readFile(workspace.id, markerPath);
       } catch {
         // Marker doesn't exist, create it
-        await sandbox.fs.writeFile(markerPath, Buffer.from(state.lastDaytonaSync.toISOString()));
+        await daytonaManager.writeFile(workspace.id, markerPath, state.lastDaytonaSync.toISOString());
       }
 
       // Get list of files modified since marker
-      const result = await sandbox.process.executeCommand(
-        `find . -type f -newer ${markerPath} 2>/dev/null | grep -v node_modules | grep -v .git | grep -v .next | grep -v dist | grep -v build || echo ""`
+      // Escape marker path to prevent command injection
+      const escapedMarkerPath = escapeShellArg(markerPath);
+      const result = await daytonaManager.executeCommand(
+        workspace.id,
+        `find . -type f -newer ${escapedMarkerPath} 2>/dev/null | grep -v node_modules | grep -v .git | grep -v .next | grep -v dist | grep -v build || echo ""`
       );
 
       if (!result.stdout || result.stdout.trim() === '') {
@@ -267,7 +280,7 @@ export class SyncManager {
       for (const filePath of changedFiles) {
         try {
           const relativePath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
-          const content = await sandbox.fs.readFile(relativePath);
+          const content = await daytonaManager.readFile(workspace.id, relativePath);
 
           // Determine mime type from extension
           const ext = filePath.split('.').pop() || '';
@@ -281,7 +294,7 @@ export class SyncManager {
       }
 
       // Update marker file
-      await sandbox.fs.writeFile(markerPath, Buffer.from(new Date().toISOString()));
+      await daytonaManager.writeFile(workspace.id, markerPath, new Date().toISOString());
       state.lastDaytonaSync = new Date();
     } catch (error) {
       console.error('[Sync Manager] Daytona→VFS sync failed:', error);
@@ -321,7 +334,7 @@ export class SyncManager {
       return;
     }
 
-    const sandbox = await daytonaManager.getSandbox(workspace.daytona_sandbox_id);
+
 
     // Get all files from VFS
     const files = await this.getAllVFSFiles(projectId, '/');
@@ -337,11 +350,11 @@ export class SyncManager {
           const parentDir = file.path.substring(0, file.path.lastIndexOf('/'));
 
           if (parentDir && parentDir !== '') {
-            await sandbox.process.executeCommand(`mkdir -p "${parentDir}"`);
+            await daytonaManager.executeCommand(workspace.id, `mkdir -p "${parentDir}"`);
           }
 
           const relativePath = file.path.startsWith('/') ? file.path.substring(1) : file.path;
-          await sandbox.fs.writeFile(relativePath, content);
+          await daytonaManager.writeFile(workspace.id, relativePath, content.toString('utf-8'));
 
           synced++;
           if (synced % 10 === 0) {
@@ -367,10 +380,11 @@ export class SyncManager {
       return;
     }
 
-    const sandbox = await daytonaManager.getSandbox(workspace.daytona_sandbox_id);
+
 
     // Get list of all files in Daytona
-    const result = await sandbox.process.executeCommand(
+    const result = await daytonaManager.executeCommand(
+      workspace.id,
       'find . -type f | grep -v node_modules | grep -v .git | grep -v .next | grep -v dist | grep -v build'
     );
 
@@ -386,7 +400,7 @@ export class SyncManager {
     for (const filePath of files) {
       try {
         const relativePath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
-        const content = await sandbox.fs.readFile(relativePath);
+        const content = await daytonaManager.readFile(workspace.id, relativePath);
 
         const ext = filePath.split('.').pop() || '';
         const mimeType = this.getMimeType(ext);
@@ -491,6 +505,20 @@ export class SyncManager {
       lastVFSSync: state.lastVFSSync,
       lastDaytonaSync: state.lastDaytonaSync
     };
+  }
+
+  /**
+   * Cleanup all active syncs (for graceful shutdown)
+   */
+  cleanup(): void {
+    console.log(`[Sync Manager] Cleaning up ${this.syncStates.size} active syncs...`);
+    for (const [key, state] of this.syncStates.entries()) {
+      state.isActive = false;
+      if (state.vfsInterval) clearInterval(state.vfsInterval);
+      if (state.daytonaInterval) clearInterval(state.daytonaInterval);
+    }
+    this.syncStates.clear();
+    console.log('[Sync Manager] Cleanup complete');
   }
 }
 

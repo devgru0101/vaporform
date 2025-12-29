@@ -4,6 +4,7 @@
  */
 
 import { api, Header, Query, APIError } from 'encore.dev/api';
+import log from 'encore.dev/log';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { daytonaManager } from './daytona-manager.js';
@@ -31,9 +32,17 @@ async function triggerAutoBuildIfNeeded(projectId: bigint, workspaceId: bigint):
       const lastBuild = builds[0];
 
       if (lastBuild.status === 'failed') {
-        console.log(`[Auto-Build] Last build failed for project ${projectId}, skipping auto-rebuild`);
-        // Don't auto-rebuild if last build failed - user should explicitly fix and rebuild
-        shouldBuild = false;
+        // Check if we have CONSECUTIVE failures (last 2 builds both failed)
+        // If yes, skip to avoid infinite retry loop
+        // If only last build failed, try once more (agent may have fixed issues)
+        if (builds.length >= 2 && builds[1].status === 'failed') {
+          console.log(`[Auto-Build] Multiple consecutive build failures for project ${projectId}, skipping auto-rebuild`);
+          console.log(`[Auto-Build] User/agent should explicitly fix build issues and rebuild`);
+          shouldBuild = false;
+        } else {
+          console.log(`[Auto-Build] Last build failed for project ${projectId}, but will retry once (single failure)`);
+          shouldBuild = true;
+        }
       } else if (lastBuild.status === 'building' || lastBuild.status === 'pending') {
         console.log(`[Auto-Build] Build already in progress for project ${projectId}`);
         shouldBuild = false;
@@ -49,6 +58,33 @@ async function triggerAutoBuildIfNeeded(projectId: bigint, workspaceId: bigint):
           console.log(`[Auto-Build] Last successful build is old for project ${projectId}, triggering rebuild`);
           shouldBuild = true;
         }
+      }
+    }
+
+    if (shouldBuild) {
+      // CRITICAL: Check if project has any code files before building
+      // Prevents "build failed" on empty/newly-created projects
+      console.log(`[Auto-Build] Checking if project ${projectId} has code files...`);
+
+      try {
+        const filesResult = await daytonaManager.executeCommand(workspaceId,
+          'find . -type f \\( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.rb" -o -name "*.php" -o -name "package.json" -o -name "requirements.txt" -o -name "go.mod" -o -name "Gemfile" -o -name "composer.json" \\) | head -10'
+        );
+
+        const hasCodeFiles = filesResult.stdout && filesResult.stdout.trim().length > 0;
+
+        if (!hasCodeFiles) {
+          console.log(`[Auto-Build] Project ${projectId} has no code files yet, skipping build`);
+          console.log(`[Auto-Build] User should add code before building`);
+          shouldBuild = false;
+        } else {
+          console.log(`[Auto-Build] Project ${projectId} has code files, proceeding with build`);
+        }
+      } catch (error) {
+        console.warn(`[Auto-Build] Failed to check for code files:`, error);
+        // If check fails, err on the side of NOT building to avoid false "build failed" 
+        console.log(`[Auto-Build] Skipping build due to file check failure`);
+        shouldBuild = false;
       }
     }
 
@@ -382,6 +418,44 @@ export const getProjectWorkspace = api(
       console.log(`[Workspace Manager] Workspace status for project ${projectId}: ${workspace.status}`);
     }
 
+    // AUTO-FIX: If workspace exists but has no Daytona sandbox, create one
+    if (workspace && !workspace.daytona_sandbox_id) {
+      console.log(`[Workspace Manager] ⚠️  Workspace ${workspace.id} has no Daytona sandbox ID - auto-creating...`);
+
+      try {
+        // Get project details for sandbox creation
+        const project = await projectDB.queryRow<{ id: bigint; name: string; template: string | null }>`
+          SELECT id, name, template FROM projects WHERE id = ${projectId}
+        `;
+
+        if (project) {
+          const template = project.template || 'typescript';
+
+          console.log(`[Workspace Manager] Starting Daytona sandbox for workspace ${workspace.id}...`);
+
+          // Start the workspace (creates Daytona sandbox)
+          await daytonaManager.getLifecycle().startWorkspace(workspace.id, {
+            language: template,
+            environment: {
+              PROJECT_ID: projectId.toString(),
+              PROJECT_NAME: project.name,
+            },
+            autoStopInterval: 60,
+            autoArchiveInterval: 24 * 60,
+            ephemeral: false,
+          });
+
+          console.log(`[Workspace Manager] ✓ Auto-created Daytona sandbox for workspace ${workspace.id}`);
+
+          // Refresh workspace to get updated sandbox_id
+          workspace = await daytonaManager.getProjectWorkspace(projectId);
+        }
+      } catch (error) {
+        console.error(`[Workspace Manager] ✗ Failed to auto-create Daytona sandbox:`, error);
+        // Don't throw - let the request continue with the workspace in its current state
+      }
+    }
+
     // Sync status with Daytona API before returning
     if (workspace) {
       workspace = await daytonaManager.syncWorkspaceStatus(workspace.id);
@@ -508,92 +582,106 @@ export const deleteWorkspace = api(
 export const forceRebuildWorkspace = api(
   { method: 'POST', path: '/workspace/rebuild/:projectId' },
   async (req: ForceRebuildWorkspaceRequest): Promise<{ workspace: any }> => {
-    const { userId } = await verifyClerkJWT(req.authorization);
-    const projectId = BigInt(req.projectId);
+    log.info('Force Rebuild request received', { projectId: req.projectId });
 
-    await ensureProjectPermission(userId, projectId, 'edit');
+    try {
+      const { userId } = await verifyClerkJWT(req.authorization);
+      log.info('Force Rebuild user authenticated', { userId, projectId: req.projectId });
 
-    console.log(`[Force Rebuild] Starting force rebuild for project ${projectId}`);
+      const projectId = BigInt(req.projectId);
 
-    // Get existing workspace if it exists
-    const existingWorkspace = await daytonaManager.getProjectWorkspace(projectId);
+      await ensureProjectPermission(userId, projectId, 'edit');
+      log.info('Force Rebuild permissions validated', { userId, projectId });
 
-    if (existingWorkspace) {
-      console.log(`[Force Rebuild] Deleting existing workspace ${existingWorkspace.id} for project ${projectId}`);
-      try {
-        await daytonaManager.deleteWorkspace(existingWorkspace.id);
-        console.log(`[Force Rebuild] ✓ Deleted workspace ${existingWorkspace.id}`);
-      } catch (error) {
-        console.error(`[Force Rebuild] Error deleting workspace:`, error);
-        // Continue even if delete fails - we'll create a new one anyway
-      }
-    } else {
-      console.log(`[Force Rebuild] No existing workspace found for project ${projectId}`);
-    }
+      log.info('Force Rebuild starting', { projectId });
 
-    // Get project details for new workspace
-    const project = await projectDB.queryRow<{ id: bigint; name: string; template: string | null }>`
-      SELECT id, name, template FROM projects WHERE id = ${projectId}
-    `;
+      // Get existing workspace if it exists
+      const existingWorkspace = await daytonaManager.getProjectWorkspace(projectId);
 
-    if (!project) {
-      throw new Error(`Project ${projectId} not found`);
-    }
-
-    const workspaceName = `${project.name} Workspace`;
-
-    // Detect language from project files (for GitHub imports) or use template
-    let detectedLanguage = project.template || 'typescript';
-
-    if (project.template === 'github-import' || !project.template) {
-      // Detect language from files in VFS
-      const { gridfs } = await import('../vfs/gridfs.js');
-      try {
-        // Check for package.json (Node.js/TypeScript)
-        const packageJsonBuffer = await gridfs.readFile(projectId, '/package.json');
-        if (packageJsonBuffer) {
-          detectedLanguage = 'typescript';
-          console.log(`[Force Rebuild] Detected Node.js/TypeScript project from package.json`);
-        }
-      } catch {
-        // Check for requirements.txt (Python)
+      if (existingWorkspace) {
+        log.info('Force Rebuild deleting existing workspace', { workspaceId: existingWorkspace.id, projectId });
         try {
-          const reqBuffer = await gridfs.readFile(projectId, '/requirements.txt');
-          if (reqBuffer) {
-            detectedLanguage = 'python';
-            console.log(`[Force Rebuild] Detected Python project from requirements.txt`);
+          await daytonaManager.deleteWorkspace(existingWorkspace.id);
+          log.info('Force Rebuild deleted workspace successfully', { workspaceId: existingWorkspace.id });
+        } catch (error) {
+          log.error('Force Rebuild workspace deletion failed', { error, workspaceId: existingWorkspace.id });
+          // Continue even if delete fails - we'll create a new one anyway
+        }
+      } else {
+        log.info('Force Rebuild no existing workspace found', { projectId });
+      }
+
+      // Get project details for new workspace
+      const project = await projectDB.queryRow<{ id: bigint; name: string; template: string | null }>`
+        SELECT id, name, template FROM projects WHERE id = ${projectId}
+      `;
+
+      if (!project) {
+        throw new Error(`Project ${projectId} not found`);
+      }
+
+      const workspaceName = `${project.name} Workspace`;
+
+      // Detect language from project files (for GitHub imports) or use template
+      let detectedLanguage = project.template || 'typescript';
+
+      if (project.template === 'github-import' || !project.template) {
+        // Detect language from files in VFS
+        const { gridfs } = await import('../vfs/gridfs.js');
+        try {
+          // Check for package.json (Node.js/TypeScript)
+          const packageJsonBuffer = await gridfs.readFile(projectId, '/package.json');
+          if (packageJsonBuffer) {
+            detectedLanguage = 'typescript';
+            log.info('Force Rebuild detected Node.js/TypeScript project', { projectId });
           }
         } catch {
-          // Default to typescript
-          detectedLanguage = 'typescript';
-          console.log(`[Force Rebuild] Could not detect language, defaulting to TypeScript`);
+          // Check for requirements.txt (Python)
+          try {
+            const reqBuffer = await gridfs.readFile(projectId, '/requirements.txt');
+            if (reqBuffer) {
+              detectedLanguage = 'python';
+              log.info('Force Rebuild detected Python project', { projectId });
+            }
+          } catch {
+            // Default to typescript
+            detectedLanguage = 'typescript';
+            log.info('Force Rebuild defaulting to TypeScript', { projectId });
+          }
         }
       }
+
+      log.info('Force Rebuild creating new workspace', { projectId, projectName: project.name, language: detectedLanguage });
+
+      // Create new workspace
+      const newWorkspace = await daytonaManager.createWorkspace(projectId, workspaceName, {
+        language: detectedLanguage,
+        environment: {
+          PROJECT_ID: projectId.toString(),
+          PROJECT_NAME: project.name,
+        },
+        autoStopInterval: 60, // Auto-stop after 1 hour
+        autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
+        ephemeral: false,
+      });
+
+      log.info('Force Rebuild created new workspace', { workspaceId: newWorkspace.id, projectId });
+
+      // Deploy files from VFS to Daytona sandbox (await to ensure readiness)
+      // This copies all project files from GridFS to the actual sandbox
+      try {
+        await deployProjectFilesInBackground(newWorkspace.id, projectId);
+      } catch (err) {
+        log.error('Force Rebuild file deployment failed', { error: err, workspaceId: newWorkspace.id, projectId });
+        // We still return the workspace, but log the error. 
+        // Ideally we might want to fail the request or mark workspace as degraded.
+      }
+
+      return { workspace: newWorkspace };
+    } catch (error) {
+      log.error('Force Rebuild CRITICAL FAILURE', { error, projectId: req.projectId });
+      throw error;
     }
-
-    console.log(`[Force Rebuild] Creating new workspace for project ${projectId} (${project.name}) with language: ${detectedLanguage}`);
-
-    // Create new workspace
-    const newWorkspace = await daytonaManager.createWorkspace(projectId, workspaceName, {
-      language: detectedLanguage,
-      environment: {
-        PROJECT_ID: projectId.toString(),
-        PROJECT_NAME: project.name,
-      },
-      autoStopInterval: 60, // Auto-stop after 1 hour
-      autoArchiveInterval: 24 * 60, // Auto-archive after 24 hours
-      ephemeral: false,
-    });
-
-    console.log(`[Force Rebuild] ✓ Created new workspace ${newWorkspace.id} for project ${projectId}`);
-
-    // Deploy files from VFS to Daytona sandbox (in background)
-    // This copies all project files from GridFS to the actual sandbox
-    deployProjectFilesInBackground(newWorkspace.id, projectId).catch(err => {
-      console.error(`[Force Rebuild] Failed to deploy files from VFS to sandbox:`, err);
-    });
-
-    return { workspace: newWorkspace };
   }
 );
 
@@ -601,7 +689,7 @@ export const forceRebuildWorkspace = api(
  * Deploy project files from VFS to Daytona sandbox (background task)
  */
 async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bigint): Promise<void> {
-  console.log(`[Force Rebuild] Starting file deployment from VFS to workspace ${workspaceId}...`);
+  log.info('Force Rebuild starting file deployment', { workspaceId, projectId });
 
   // Wait for workspace to be fully running before deploying files
   let retries = 0;
@@ -612,31 +700,29 @@ async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bi
       const workspace = await daytonaManager.getWorkspace(workspaceId);
 
       if (workspace.status === 'running' && workspace.daytona_sandbox_id) {
-        console.log(`[Force Rebuild] Workspace ${workspaceId} is running, deploying files...`);
+        log.info('Force Rebuild workspace ready, deploying files', { workspaceId, status: workspace.status });
 
         try {
-          const result = await daytonaManager.deployProjectFromVFS(workspaceId, projectId);
-          console.log(`[Force Rebuild] ✓ Deployed ${result.filesDeployed} files from VFS to workspace ${workspaceId}`);
+          // Start build to get buildId for progress tracking
+          const build = await daytonaManager.buildProject(projectId, workspaceId);
+          log.info('Force Rebuild created build for tracking', { buildId: build.id, workspaceId, projectId });
 
-          // Trigger build process after files are deployed
-          console.log(`[Force Rebuild] Starting build process for workspace ${workspaceId}...`);
-          await buildProjectAfterDeploy(workspaceId, projectId).catch(buildError => {
-            console.error(`[Force Rebuild] Build failed:`, buildError);
-            // Don't throw - file deployment was successful
-          });
+          // Deploy files with buildId for progress events
+          const result = await daytonaManager.deployProjectFromVFS(workspaceId, projectId, undefined, build.id);
+          log.info('Force Rebuild deployed files successfully', { filesDeployed: result.filesDeployed, workspaceId, projectId });
 
           return;
         } catch (deployError) {
-          console.error(`[Force Rebuild] Error deploying files:`, deployError);
+          log.error('Force Rebuild deployment error', { error: deployError, workspaceId, projectId });
           throw deployError;
         }
       }
 
-      console.log(`[Force Rebuild] Waiting for workspace ${workspaceId} to be running (status: ${workspace.status}, sandbox: ${workspace.daytona_sandbox_id || 'NONE'})...`);
+      log.info('Force Rebuild waiting for workspace', { workspaceId, status: workspace.status, retries });
       await new Promise(resolve => setTimeout(resolve, 1000));
       retries++;
     } catch (error) {
-      console.error(`[Force Rebuild] Error checking workspace status:`, error);
+      log.error('Force Rebuild workspace status check failed', { error, workspaceId, retries });
       await new Promise(resolve => setTimeout(resolve, 1000));
       retries++;
     }
@@ -732,12 +818,17 @@ export const codeRun = api(
     const result = await daytonaManager.codeRun(
       workspaceId,
       req.code,
-      req.language || 'python',
-      req.argv,
-      req.env
+      {
+        argv: req.argv,
+        env: req.env
+      },
+      30 // default timeout
     );
 
-    return result;
+    return {
+      ...result,
+      result: result.stdout // Map stdout to result field expected by CodeRunResponse
+    };
   }
 );
 
@@ -1381,7 +1472,7 @@ export const createSshToken = api(
       };
     } catch (error) {
       console.error('[SSH Token] Error creating SSH token:', error);
-      throw toAPIError(error);
+      throw toAPIError(error as any);
     }
   }
 );
@@ -1414,6 +1505,33 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
 
   let sshClient: Client | null = null;
   let sshStream: any = null;
+  let connectionTimeout: NodeJS.Timeout | null = null;
+  let heartbeatInterval: NodeJS.Timeout | null = null;
+
+  // Set connection timeout (30 seconds to establish connection)
+  connectionTimeout = setTimeout(() => {
+    console.error('[SSH Terminal] Connection timeout - closing WebSocket');
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1008, 'Connection timeout');
+    }
+    if (sshClient) {
+      sshClient.end();
+    }
+  }, 30000);
+
+  // Setup heartbeat to detect dead connections
+  heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    } else {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+    }
+  }, 30000);
+
+  // Handle pong responses
+  ws.on('pong', () => {
+    console.debug('[SSH Terminal] Heartbeat pong received');
+  });
 
   try {
     // Extract parameters from URL
@@ -1436,9 +1554,9 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
     const { userId } = await verifyClerkJWT(`Bearer ${token}`);
     console.log(`[SSH Terminal] Authenticated user: ${userId}`);
 
-    // TODO: Fix permission check - temporarily bypassed for testing
-    // await ensureProjectPermission(userId, projectId, 'view');
-    console.log(`[SSH Terminal] Permission check bypassed (TODO: fix permission logic)`);
+    // Verify project permission
+    await ensureProjectPermission(userId, projectId, 'view');
+    console.log(`[SSH Terminal] Permission check passed`);
 
     // Get workspace for this project (auto-create if needed)
     let workspace = await daytonaManager.getProjectWorkspace(projectId);
@@ -1483,7 +1601,7 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
         cols,
         rows,
         timeout: 15000
-      }, (err, stream) => {
+      } as any, (err, stream) => {
         if (err) {
           console.error('[SSH Terminal] Failed to create shell:', err);
           console.error('[SSH Terminal] Shell error details:', {
@@ -1599,6 +1717,11 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
     // Handle WebSocket close
     ws.on('close', async () => {
       console.log('[SSH Terminal] WebSocket connection closed');
+
+      // Clear timeouts
+      if (connectionTimeout) clearTimeout(connectionTimeout);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+
       if (sshStream) {
         sshStream.end();
       }
@@ -1661,7 +1784,7 @@ export const syncWorkspace = api(
 
     console.log(`[Workspace API] Manual sync requested: ${direction}`);
 
-    await syncManager.fullSync(workspace.project_id, id, direction);
+    await syncManager.fullSync(workspace.project_id, id, direction as 'to-daytona' | 'to-vfs' | 'bidirectional');
 
     return {
       success: true,

@@ -449,14 +449,24 @@ export class BuildManager {
    * Update build status
    */
   private async updateBuildStatus(buildId: bigint, status: BuildStatus, errorMessage?: string): Promise<void> {
-    await db.exec`
-      UPDATE builds
-      SET
-        status = ${status},
-        error_message = ${errorMessage || null},
-        completed_at = ${status === 'success' || status === 'failed' ? 'NOW()' : null}
-      WHERE id = ${buildId}
-    `;
+    if (status === 'success' || status === 'failed') {
+      await db.exec`
+        UPDATE builds
+        SET
+          status = ${status},
+          error_message = ${errorMessage || null},
+          completed_at = NOW()
+        WHERE id = ${buildId}
+      `;
+    } else {
+      await db.exec`
+        UPDATE builds
+        SET
+          status = ${status},
+          error_message = ${errorMessage || null}
+        WHERE id = ${buildId}
+      `;
+    }
   }
 
   /**

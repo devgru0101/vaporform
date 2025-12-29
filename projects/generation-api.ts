@@ -7,7 +7,7 @@ import { api, Header } from 'encore.dev/api';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from './permissions.js';
 import { startProjectGeneration, getGenerationJob, getGenerationLogs } from '../ai/project-generator.js';
-import type { WizardData } from '../ai/prompt-templates.js';
+import type { WizardData } from '../shared/types.js';
 import { ValidationError, toAPIError } from '../shared/errors.js';
 
 interface GenerateProjectRequest {

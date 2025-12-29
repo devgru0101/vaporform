@@ -24,7 +24,8 @@ echo ""
 
 # Start infrastructure
 echo "Starting infrastructure services..."
-cd /home/ssitzer/projects/vaporform
+# Use script directory as base
+cd "$(dirname "$0")"
 docker compose up -d
 
 echo ""
@@ -72,11 +73,10 @@ echo ""
 echo "=== Next Steps ==="
 echo "1. Update .env file with your API keys (OpenAI, Clerk)"
 echo "2. Start Encore backend:"
-echo "   cd /home/ssitzer/projects/vaporform"
 echo "   encore run"
 echo ""
 echo "3. Start Next.js frontend (in another terminal):"
-echo "   cd /home/ssitzer/projects/vaporform-frontend"
+echo "   cd frontend"
 echo "   npm run dev"
 echo ""
 echo "4. Access:"

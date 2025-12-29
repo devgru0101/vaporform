@@ -66,3 +66,6 @@ docker-compose.override.yml
 !README.md
 !**/README.md
 !CLAUDE.md
+
+# Ignore frontend for Encore build
+frontend/

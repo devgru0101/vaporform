@@ -107,7 +107,7 @@ export const getUserSettings = api(
         minimap: true,
         lineNumbers: true,
         wordWrap: false,
-        aiModel: 'claude-3-5-sonnet-20241022',
+        aiModel: 'claude-sonnet-4-5-20250929',
         aiTemperature: 0.7,
         aiMaxTokens: 8192,
         aiAutoComplete: true,

@@ -7,9 +7,14 @@ import { api, Header } from 'encore.dev/api';
 import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { gridfs } from './gridfs.js';
+import { daytonaManager } from '../workspace/daytona-manager.js'; // NEW: For reading from Daytona sandbox
 import { ValidationError, toAPIError } from '../shared/errors.js';
 import type { FileMetadata } from '../shared/types.js';
 import { ALLOWED_FILE_EXTENSIONS, MAX_FILE_SIZE_BYTES } from '../shared/constants.js';
+import { db as projectDB } from '../projects/db.js'; // NEW: For getting workspace ID
+import { promises as fs } from 'fs'; // For reading Git repos
+import { join, basename, dirname } from 'path'; // For path manipulation
+import { tmpdir } from 'os'; // For Git repo location
 
 // Initialize GridFS connection on service start
 gridfs.connect().catch((err) => {
@@ -142,18 +147,48 @@ export const readFile = api(
     // Check view permission
     await ensureProjectPermission(userId, projectId, 'view');
 
-    const buffer = await gridfs.readFile(projectId, req.path);
-    const metadata = await gridfs.getMetadata(projectId, req.path);
+    // Normalize path: remove leading slashes to avoid double slashes in URLs
+    const normalizedPath = req.path.replace(/^\/+/, '');
 
-    if (!metadata) {
-      throw toAPIError(new ValidationError('File metadata not found'));
+    try {
+      // Read from local Git repository (matching listDirectory behavior)
+      const gitRepoPath = join(tmpdir(), `vaporform-git-${projectId}`);
+      const fullPath = join(gitRepoPath, normalizedPath);
+
+      console.log(`[VFS] Reading file from Git repo: ${fullPath}`);
+
+      // Read file content
+      const buffer = await fs.readFile(fullPath);
+
+      // Get file stats for metadata
+      const stats = await fs.stat(fullPath);
+
+      // Create metadata object matching FileMetadata interface
+      const metadata = {
+        id: BigInt(Date.now()),
+        project_id: projectId,
+        gridfs_file_id: '', // Not using GridFS anymore
+        path: normalizedPath,
+        filename: basename(normalizedPath),
+        mime_type: 'text/plain', // Could enhance with mime-type detection
+        size_bytes: BigInt(stats.size),
+        version: 1,
+        is_directory: false,
+        parent_path: dirname(normalizedPath),
+        created_at: stats.birthtime,
+        updated_at: stats.mtime,
+        deleted_at: null,
+      };
+
+      // Return as base64 to handle binary files
+      return {
+        content: buffer.toString('base64'),
+        metadata,
+      };
+    } catch (error) {
+      console.error(`[VFS] Error reading file from Git:`, error);
+      throw toAPIError(new ValidationError(`File not found: ${normalizedPath}`));
     }
-
-    // Return as base64 to handle binary files
-    return {
-      content: buffer.toString('base64'),
-      metadata,
-    };
   }
 );
 
@@ -185,9 +220,79 @@ export const listDirectory = api(
 
     await ensureProjectPermission(userId, projectId, 'view');
 
-    const files = await gridfs.listDirectory(projectId, req.path || '/');
+    try {
+      // Read from local Git repository
+      const gitRepoPath = join(tmpdir(), `vaporform-git-${projectId}`);
+      const requestedPath = req.path || '/';
+      const fullPath = join(gitRepoPath, requestedPath);
 
-    return { files };
+      console.log(`[VFS] Reading from Git repo: ${gitRepoPath}, path: ${requestedPath}`);
+
+      // Read directory contents
+      const entries = await fs.readdir(fullPath, { withFileTypes: true });
+
+      // Convert to FileMetadata format
+      const files: any[] = await Promise.all(
+        entries
+          .filter(entry => {
+            // Exclude .git directory
+            if (entry.name.startsWith('.git')) return false;
+
+            // Exclude temp files created by agent
+            if (entry.name.endsWith('.log')) return false;
+            if (entry.name.startsWith('proxy-server')) return false;
+            if (entry.name === 'nohup.out') return false;
+
+            // Exclude common temp directories
+            if (entry.name === 'tmp' || entry.name === '.tmp') return false;
+            if (entry.name === '.daytona') return false;
+
+            // Exclude OS/system files
+            if (entry.name.startsWith('.DS_Store')) return false;
+            if (entry.name === 'Thumbs.db') return false;
+
+            return true;
+          })
+          .map(async (entry) => {
+            const entryPath = join(fullPath, entry.name);
+            const relativePath = join(requestedPath, entry.name).replace(/^\/+/, ''); // Remove leading slashes
+
+            try {
+              const stats = await fs.stat(entryPath);
+              const isDirectory = entry.isDirectory();
+
+              return {
+                id: BigInt(Date.now() + Math.floor(Math.random() * 1000)), // Temp ID for display
+                filename: entry.name, // FIXED: was "name", frontend expects "filename"
+                path: relativePath || entry.name, // Ensure path is never empty
+                is_directory: isDirectory, // FIXED: was "type: 'directory'/'file'", frontend expects boolean
+                mime_type: isDirectory ? 'inode/directory' : 'text/plain',
+                size_bytes: entry.isFile() ? BigInt(stats.size) : BigInt(0),
+                created_at: stats.birthtime,
+                updated_at: stats.mtime,
+              };
+            } catch (error) {
+              console.warn(`[VFS] Failed to stat ${entryPath}:`, error);
+              return null;
+            }
+          })
+      );
+
+      const validFiles = files.filter(f => f !== null);
+      console.log(`[VFS] Found ${validFiles.length} files in Git repo`);
+
+      return { files: validFiles };
+    } catch (error) {
+      console.error(`[VFS] Error reading Git repo:`, error);
+
+      // If Git repo doesn't exist, return empty (don't fail)
+      if ((error as any).code === 'ENOENT') {
+        console.log(`[VFS] Git repo not found for project ${projectId}, returning empty`);
+        return { files: [] };
+      }
+
+      throw toAPIError(new ValidationError(`Failed to list directory: ${error instanceof Error ? error.message : 'Unknown error'}`));
+    }
   }
 );
 

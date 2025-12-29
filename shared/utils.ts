@@ -94,12 +94,24 @@ export function getMimeType(filename: string): string {
   return mimeTypes[ext || ''] || 'application/octet-stream';
 }
 
+import path from 'path';
+
 /**
- * Normalize file path
+ * Normalize file path and prevent directory traversal
  */
-export function normalizePath(path: string): string {
-  if (!path.startsWith('/')) path = '/' + path;
-  return path.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+export function normalizePath(p: string): string {
+  // Ensure we're working with forward slashes for consistency
+  const forwardSlashed = p.replace(/\\/g, '/');
+
+  // treat all paths as absolute from root to handle '..' correctly
+  const absolutePath = forwardSlashed.startsWith('/') ? forwardSlashed : '/' + forwardSlashed;
+
+  // Resolve '..' and '.'
+  // path.posix.normalize('/../../foo') will return '/foo' (staying at root)
+  // path.posix.normalize('/../') will return '/'
+  const normalized = path.posix.normalize(absolutePath);
+
+  return normalized;
 }
 
 /**

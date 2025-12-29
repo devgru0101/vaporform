@@ -14,7 +14,14 @@ interface GetUserResponse {
 
 interface UpdateUserRequest {
   authorization: Header<'Authorization'>;
-  subscriptionTier?: 'free' | 'pro' | 'team' | 'enterprise';
+  // subscriptionTier removed to prevent self-promotion
+  // subscriptionTier?: 'free' | 'pro' | 'team' | 'enterprise';
+}
+
+interface UpdateSubscriptionRequest {
+  userId: string; // Clerk User ID
+  tier: 'free' | 'pro' | 'team' | 'enterprise';
+  adminSecret: Header<'X-Admin-Secret'>;
 }
 
 interface ListUsersResponse {
@@ -84,11 +91,10 @@ export const updateCurrentUser = api(
   async (req: UpdateUserRequest): Promise<GetUserResponse> => {
     const { userId } = await verifyClerkJWT(req.authorization);
 
-    // Update user
+    // Update user (subscription_tier update removed)
     await db.exec`
       UPDATE users
       SET
-        subscription_tier = COALESCE(${req.subscriptionTier || null}, subscription_tier),
         updated_at = NOW()
       WHERE clerk_user_id = ${userId}
     `;
@@ -104,6 +110,32 @@ export const updateCurrentUser = api(
     }
 
     return { user };
+  }
+);
+
+/**
+ * Admin: Update user subscription tier
+ * Protected by X-Admin-Secret header
+ */
+export const updateUserSubscription = api(
+  { method: 'POST', path: '/admin/users/subscription' },
+  async (req: UpdateSubscriptionRequest): Promise<{ success: boolean }> => {
+    // Verify admin secret (simple check for now, should be env var)
+    // In production, use Encore's secret manager
+    const validSecret = process.env.ADMIN_SECRET || 'dev_admin_secret';
+    if (req.adminSecret !== validSecret) {
+      throw new Error('Unauthorized: Invalid admin secret');
+    }
+
+    await db.exec`
+      UPDATE users
+      SET
+        subscription_tier = ${req.tier},
+        updated_at = NOW()
+      WHERE clerk_user_id = ${req.userId}
+    `;
+
+    return { success: true };
   }
 );
 

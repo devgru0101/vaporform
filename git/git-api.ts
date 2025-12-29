@@ -547,11 +547,12 @@ export const pushToGitHub = api(
 
     try {
       // Add GitHub remote if it doesn't exist
-      const remoteUrl = `https://${req.pat}@github.com/${req.repoFullName}.git`;
+      // Use clean URL without embedded credentials
+      const remoteUrl = `https://github.com/${req.repoFullName}.git`;
       await git.addRemote('origin', remoteUrl);
 
-      // Push to GitHub
-      await git.push('origin', req.branch || 'main');
+      // Push to GitHub with explicit token for header injection
+      await git.push('origin', req.branch || 'main', req.pat);
 
       // Update project with GitHub repo info
       const { db } = await import('../projects/db.js');
@@ -664,6 +665,7 @@ export const importGitHubRepo = api(
 
     try {
       // Clone the repository with the specified branch
+      // Use clean URL (crypto logic now handled inside cloneRepository)
       const repoUrl = `https://github.com/${req.repoFullName}.git`;
       await git.cloneRepository(repoUrl, req.pat, req.branch);
 

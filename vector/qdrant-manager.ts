@@ -40,8 +40,8 @@ interface SearchResult {
 }
 
 export class QdrantManager {
-  private client: QdrantClient;
-  private openai: OpenAI;
+  private client!: QdrantClient;
+  private openai!: OpenAI;
   private readonly embeddingModel = 'text-embedding-3-small';
   private readonly embeddingDimension = 1536;
 

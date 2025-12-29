@@ -4,7 +4,7 @@
 
 import { checkOrganizationPermission, getUserSubscriptionTier } from '../shared/clerk-auth.js';
 import type { Project } from '../shared/types.js';
-import { ForbiddenError } from '../shared/errors.js';
+import { ForbiddenError, NotFoundError, toAPIError } from '../shared/errors.js';
 import { db } from './db.js';
 
 /**
@@ -78,15 +78,56 @@ export async function checkProjectPermission(
 /**
  * Ensure user has permission or throw error
  */
+/**
+ * Ensure user has permission or throw error
+ */
 export async function ensureProjectPermission(
   userId: string,
   projectId: bigint,
   permission: ProjectPermission
 ): Promise<void> {
-  const hasPermission = await checkProjectPermission(userId, projectId, permission);
+  try {
+    // Check existence first to distinguish 404 from 403
+    const project = await db.queryRow<{ clerk_org_id: string | null; clerk_user_id: string }>`
+      SELECT clerk_org_id, clerk_user_id FROM projects
+      WHERE id = ${projectId}
+      AND deleted_at IS NULL
+    `;
 
-  if (!hasPermission) {
+    if (!project) {
+      throw new NotFoundError('Project not found');
+    }
+
+    // Personal project - check ownership
+    if (!project.clerk_org_id) {
+      if (project.clerk_user_id === userId) return;
+      throw new ForbiddenError(`Insufficient permissions for project operation: ${permission}`);
+    }
+
+    // Organization project - check org membership and role
+    const requiredRoles = PERMISSION_REQUIREMENTS[permission];
+
+    for (const role of requiredRoles) {
+      const hasRole = await checkOrganizationPermission(
+        userId,
+        project.clerk_org_id,
+        role as any
+      );
+
+      if (hasRole) {
+        return;
+      }
+    }
+
     throw new ForbiddenError(`Insufficient permissions for project operation: ${permission}`);
+  } catch (error) {
+    if (error instanceof ForbiddenError || error instanceof NotFoundError) {
+      // Import needed dynamically or at top level to avoid circular deps if possible, 
+      // but here we just need to import toAPIError at top of file.
+      // Assuming toAPIError handles the conversion.
+      throw toAPIError(error);
+    }
+    throw error;
   }
 }
 

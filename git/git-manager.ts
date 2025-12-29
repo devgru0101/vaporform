@@ -427,33 +427,61 @@ export class GitManager {
   /**
    * Push to remote repository
    */
-  async push(remote: string, branch: string): Promise<void> {
+  /**
+   * Push to remote repository
+   */
+  async push(remote: string, branch: string, token?: string): Promise<void> {
     try {
       console.log(`Pushing ${branch} to ${remote}...`);
-      await this.git.push(remote, branch);
+
+      const options: string[] = [];
+
+      // Inject auth token if provided
+      if (token) {
+        const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+        options.push('-c', `http.extraHeader=${authHeader}`);
+      }
+
+      // simple-git push(remote, branch, options)
+      await this.git.push(remote, branch, options);
       console.log(`✓ Successfully pushed ${branch} to ${remote}`);
     } catch (error) {
-      console.error(`Failed to push to ${remote}:`, error);
-      throw new ValidationError(`Failed to push: ${error}`);
+      // Sanitize error message
+      let errorMsg = String(error);
+      if (token) {
+        errorMsg = errorMsg.replace(token, '***TOKEN***');
+      }
+
+      console.error(`Failed to push to ${remote}:`, errorMsg);
+      throw new ValidationError(`Failed to push to remote`);
     }
   }
 
   /**
    * Clone a GitHub repository
    */
+  /**
+   * Clone a GitHub repository
+   */
   async cloneRepository(repoUrl: string, pat: string, branch: string): Promise<void> {
     console.log(`Cloning repository ${repoUrl} (branch: ${branch})...`);
 
-    // Build authenticated URL
-    const urlWithAuth = repoUrl.replace('https://', `https://${pat}@`);
+    // Use header injection instead of embedding token in URL
+    const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${pat}`).toString('base64')}`;
 
     try {
-      // Clone the repository with the specified branch
-      await this.git.clone(urlWithAuth, this.workdir, ['--branch', branch, '--single-branch']);
+      // Clone the repository with the specified branch and auth header
+      await this.git.clone(repoUrl, this.workdir, [
+        '--branch', branch,
+        '--single-branch',
+        '-c', `http.extraHeader=${authHeader}`
+      ]);
       console.log(`✓ Successfully cloned repository to ${this.workdir}`);
     } catch (error) {
-      console.error(`Failed to clone repository:`, error);
-      throw new ValidationError(`Failed to clone repository: ${error}`);
+      // Sanitize error message to remove any potential leaked tokens
+      const errorMsg = String(error).replace(pat, '***TOKEN***');
+      console.error(`Failed to clone repository:`, errorMsg);
+      throw new ValidationError(`Failed to clone repository`);
     }
   }
 

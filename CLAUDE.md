@@ -10,7 +10,7 @@ Vaporform is a cloud-based agentic development environment with AI-powered code 
 
 - **Backend**: Encore.ts microservices framework (10 services)
 - **Databases**: PostgreSQL (metadata), MongoDB GridFS (file storage), Qdrant (vector embeddings), Redis (cache/sessions)
-- **AI**: Anthropic Claude (claude-sonnet-4-5, claude-3-5-sonnet) for agentic code generation
+- **AI**: Anthropic Claude (claude-sonnet-4-5, claude-opus-4-5) for agentic code generation
 - **AI Embeddings**: OpenAI text-embedding-3-small for vector embeddings (RAG)
 - **Auth**: Clerk (multi-tenant with organizations and RBAC)
 - **Frontend**: Next.js 15 (monorepo at ./frontend)

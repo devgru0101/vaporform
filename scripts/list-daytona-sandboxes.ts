@@ -31,7 +31,7 @@ async function listSandboxes() {
       console.log('========================================');
       console.log(`ID: ${sandbox.id}`);
       console.log(`State: ${sandbox.state}`);
-      console.log(`Template: ${sandbox.template || 'N/A'}`);
+      console.log(`Template: ${(sandbox as any).template || 'N/A'}`);
       console.log(`Created: ${sandbox.createdAt}`);
       console.log(`Labels:`, JSON.stringify(sandbox.labels || {}, null, 2));
       console.log('========================================\n');

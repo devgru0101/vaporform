@@ -142,7 +142,10 @@ export class DockerManager {
             Name: 'unless-stopped',
           },
           NetworkMode: 'vaporform-network',
-        },
+          // Resource limits
+          Memory: 512 * 1024 * 1024, // 512MB
+          NanoCPUs: 500000000,       // 0.5 CPU
+        } as any,
         Labels: {
           'traefik.enable': 'true',
           [`traefik.http.routers.deploy-${deploymentId}.rule`]: `Host(\`${deployment.subdomain}.vaporform.dev\`)`,

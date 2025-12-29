@@ -72,19 +72,14 @@ export const batchIndexProject = api(
       // Process each file
       for (const file of codeFiles) {
         try {
-          // Read file content
-          const buffer = await gridfs.readFile(req.projectId, file.path);
-          const content = buffer.toString('utf-8');
+          // Index the file using streaming
+          const chunks = await indexFileForRAG(req.projectId, file.path);
 
-          // Skip empty or very small files
-          if (content.trim().length < 50) {
+          if (chunks === 0) {
             filesSkipped++;
-            console.log(`[Batch Indexer] Skipped ${file.path} (too small)`);
+            console.log(`[Batch Indexer] Skipped ${file.path} (empty or too small)`);
             continue;
           }
-
-          // Index the file
-          const chunks = await indexFileForRAG(req.projectId, file.path, content);
 
           filesIndexed++;
           chunksCreated += chunks;
@@ -369,51 +364,82 @@ function detectLanguage(path: string): string {
 }
 
 /**
- * Split content into chunks by line count
- */
-function splitIntoChunks(content: string, linesPerChunk: number): string[] {
-  const lines = content.split('\n');
-  const chunks: string[] = [];
-
-  for (let i = 0; i < lines.length; i += linesPerChunk) {
-    const chunk = lines.slice(i, i + linesPerChunk).join('\n');
-    if (chunk.trim().length > 0) {
-      chunks.push(chunk);
-    }
-  }
-
-  return chunks.length > 0 ? chunks : [content];
-}
-
-/**
- * Index a single file for RAG search
+ * Index a single file for RAG search using streams
  * Returns the number of chunks created
  */
 async function indexFileForRAG(
   projectId: bigint,
-  path: string,
-  content: string
+  path: string
 ): Promise<number> {
   const { qdrantManager } = await import('../vector/qdrant-manager.js');
+  const { createInterface } = await import('readline');
 
-  // Split into chunks
-  const chunks = splitIntoChunks(content, 500);
+  const fileStream = await gridfs.readFileStream(projectId, path);
 
-  // Create items for batch upsert
-  const items = chunks.map((chunk, idx) => ({
-    content: chunk,
-    metadata: {
-      sourcePath: path,
-      sourceId: `${path}:chunk${idx}`,
-      language: detectLanguage(path),
-      timestamp: new Date().toISOString(),
-      chunkIndex: idx,
-      totalChunks: chunks.length
+  const rl = createInterface({
+    input: fileStream,
+    crlfDelay: Infinity
+  });
+
+  let currentChunkLines: string[] = [];
+  let chunkIndex = 0;
+
+  // We need to accumulate chunks and send them in batches to avoid 
+  // keeping too many pending promises or Qdrant requests
+  const BATCH_SIZE = 10; // Send to Qdrant every 10 chunks (5000 lines)
+  let pendingItems: any[] = [];
+
+  for await (const line of rl) {
+    currentChunkLines.push(line);
+
+    if (currentChunkLines.length >= 500) {
+      // Finalize chunk
+      const content = currentChunkLines.join('\n');
+
+      pendingItems.push({
+        content,
+        metadata: {
+          sourcePath: path,
+          sourceId: `${path}:chunk${chunkIndex}`,
+          language: detectLanguage(path),
+          timestamp: new Date().toISOString(),
+          chunkIndex: chunkIndex
+        }
+      });
+
+      chunkIndex++;
+      currentChunkLines = [];
+
+      // Flush if batch is full
+      if (pendingItems.length >= BATCH_SIZE) {
+        await qdrantManager.batchUpsert(projectId, 'code', pendingItems);
+        pendingItems = [];
+      }
     }
-  }));
+  }
 
-  // Batch upsert to Qdrant
-  await qdrantManager.batchUpsert(projectId, 'code', items);
+  // Process remaining lines
+  if (currentChunkLines.length > 0) {
+    const content = currentChunkLines.join('\n');
+    if (content.trim().length > 0) { // Skip empty last chunks
+      pendingItems.push({
+        content,
+        metadata: {
+          sourcePath: path,
+          sourceId: `${path}:chunk${chunkIndex}`,
+          language: detectLanguage(path),
+          timestamp: new Date().toISOString(),
+          chunkIndex: chunkIndex
+        }
+      });
+      chunkIndex++;
+    }
+  }
 
-  return chunks.length;
+  // Flush remaining items
+  if (pendingItems.length > 0) {
+    await qdrantManager.batchUpsert(projectId, 'code', pendingItems);
+  }
+
+  return chunkIndex;
 }

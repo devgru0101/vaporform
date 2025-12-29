@@ -75,6 +75,14 @@ export const createProject = api(
       throw toAPIError(new ValidationError('Project name must be between 3 and 50 characters'));
     }
 
+    // Validate wizard data if present (for generated projects)
+    if (req.generateCode && req.wizardData) {
+      const data = req.wizardData;
+      if (!data.vision || !data.vision.name || !data.techStack || !data.techStack.selectedTemplate) {
+        throw toAPIError(new ValidationError('Invalid wizard data provided'));
+      }
+    }
+
     // Check project creation limits
     const limitCheck = await checkProjectCreationLimit(userId, req.orgId);
     if (!limitCheck.allowed) {

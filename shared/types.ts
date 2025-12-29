@@ -233,3 +233,25 @@ export const SUBSCRIPTION_LIMITS: Record<string, SubscriptionLimits> = {
     prioritySupport: true,
   },
 };
+
+// Project Wizard types
+export interface WizardData {
+  vision: {
+    name: string;
+    description: string;
+    coreFeatures: string;
+    targetAudience: string;
+    projectGoals: string[];
+    inspirationApps: string[];
+  };
+  techStack: {
+    selectedTemplate: string;
+    backend?: string;
+    frontend?: string;
+    database?: string;
+  };
+  integrations: Record<string, {
+    provider: string;
+    config: Record<string, string>;
+  }>;
+}

@@ -12,418 +12,15 @@ import { ValidationError, toAPIError } from '../shared/errors.js';
 import { getUserAnthropicKey } from '../users/secrets.js';
 import type Anthropic from '@anthropic-ai/sdk';
 
+
 // Define Anthropic API key secret
 // Note: Secret names are globally unique - same secret value across all services
 const anthropicAPIKey = secret("AnthropicAPIKey");
 
-// Tool definitions
-const AGENT_TOOLS: any[] = [
-  {
-    name: 'read_file',
-    description: 'Read the contents of a file from the project workspace. Can read single files or multiple files at once for efficiency.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'The relative path to the file within the project workspace',
-        },
-        line_range: {
-          type: 'object',
-          description: 'Optional: Read only specific lines',
-          properties: {
-            start: { type: 'number' },
-            end: { type: 'number' },
-          },
-        },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'write_to_file',
-    description: 'Create a new file or overwrite an existing file with new content. Always provide the complete file content.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'The relative path where the file should be created/updated',
-        },
-        content: {
-          type: 'string',
-          description: 'The complete content to write to the file',
-        },
-        line_count: {
-          type: 'number',
-          description: 'The number of lines in the content (for validation)',
-        },
-      },
-      required: ['path', 'content'],
-    },
-  },
-  {
-    name: 'execute_command',
-    description: 'Execute a shell command in the project workspace terminal. Use this for running builds, tests, installing packages, etc.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: {
-          type: 'string',
-          description: 'The shell command to execute',
-        },
-        cwd: {
-          type: 'string',
-          description: 'Optional: Working directory (relative to project root)',
-        },
-      },
-      required: ['command'],
-    },
-  },
-  {
-    name: 'list_files',
-    description: 'List files and directories in the project workspace',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Optional: Directory path to list (defaults to root)',
-        },
-        recursive: {
-          type: 'boolean',
-          description: 'Whether to list files recursively',
-        },
-      },
-    },
-  },
-  {
-    name: 'search_files',
-    description: 'Search for files matching a pattern in the project workspace',
-    input_schema: {
-      type: 'object',
-      properties: {
-        pattern: {
-          type: 'string',
-          description: 'Search pattern (supports glob patterns)',
-        },
-        path: {
-          type: 'string',
-          description: 'Optional: Directory to search in',
-        },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'ask_followup_question',
-    description: 'Ask the user a follow-up question to gather more information',
-    input_schema: {
-      type: 'object',
-      properties: {
-        question: {
-          type: 'string',
-          description: 'The question to ask the user',
-        },
-      },
-      required: ['question'],
-    },
-  },
-  {
-    name: 'attempt_completion',
-    description: 'Present the result of the task to the user. Use this when you have completed the task.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        result: {
-          type: 'string',
-          description: 'Summary of what was accomplished',
-        },
-        command: {
-          type: 'string',
-          description: 'Optional: A command for the user to run to verify the result',
-        },
-      },
-    },
-  },
-  {
-    name: 'run_code',
-    description: 'Execute code in the sandbox runtime. Supports Python, TypeScript, and JavaScript. Returns stdout, stderr, exit code, and matplotlib chart artifacts. Use for testing/validating code before deployment.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        code: {
-          type: 'string',
-          description: 'The code to execute',
-        },
-        language: {
-          type: 'string',
-          enum: ['python', 'typescript', 'javascript'],
-          description: 'Programming language to use',
-        },
-        timeout: {
-          type: 'number',
-          description: 'Timeout in seconds (default: 30)',
-          default: 30,
-        },
-      },
-      required: ['code', 'language'],
-    },
-  },
-  {
-    name: 'edit_file',
-    description: 'Make a targeted edit to a file by replacing old_text with new_text. More efficient than write_to_file for small changes. The old_text must match exactly.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'The relative path to the file to edit',
-        },
-        old_text: {
-          type: 'string',
-          description: 'The exact text to find and replace (must match exactly including whitespace)',
-        },
-        new_text: {
-          type: 'string',
-          description: 'The new text to replace with',
-        },
-      },
-      required: ['path', 'old_text', 'new_text'],
-    },
-  },
-  {
-    name: 'git_status',
-    description: 'Get the current git status showing modified, added, and deleted files.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-    },
-  },
-  {
-    name: 'git_commit',
-    description: 'Commit all staged changes with a message. Automatically stages all modified files before committing.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        message: {
-          type: 'string',
-          description: 'The commit message',
-        },
-      },
-      required: ['message'],
-    },
-  },
-  {
-    name: 'git_log',
-    description: 'Get the commit history for the project.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        limit: {
-          type: 'number',
-          description: 'Maximum number of commits to return (default: 10)',
-          default: 10,
-        },
-      },
-    },
-  },
-  {
-    name: 'git_diff',
-    description: 'Show the diff of uncommitted changes.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Optional: Show diff for specific file',
-        },
-      },
-    },
-  },
-  {
-    name: 'install_package',
-    description: 'Install a package using the project\'s package manager (npm, yarn, pnpm). Detects package manager automatically.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        package: {
-          type: 'string',
-          description: 'Package name to install (e.g., "react", "express", "@types/node")',
-        },
-        dev: {
-          type: 'boolean',
-          description: 'Install as dev dependency',
-          default: false,
-        },
-        version: {
-          type: 'string',
-          description: 'Specific version to install (e.g., "^18.0.0")',
-        },
-      },
-      required: ['package'],
-    },
-  },
-  {
-    name: 'remove_package',
-    description: 'Remove a package using the project\'s package manager.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        package: {
-          type: 'string',
-          description: 'Package name to remove',
-        },
-      },
-      required: ['package'],
-    },
-  },
-];
+import { AGENT_TOOLS, DAYTONA_TOOLS } from './tool-definitions.js';
 
-// Daytona MCP Tools for sandbox interaction
-const DAYTONA_TOOLS: any[] = [
-  {
-    name: 'daytona_execute_command',
-    description: 'Execute a shell command in the project\'s Daytona sandbox. Use this to run builds, tests, install packages, start servers, or debug issues in the running environment.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: {
-          type: 'string',
-          description: 'The shell command to execute in the sandbox',
-        },
-      },
-      required: ['command'],
-    },
-  },
-  {
-    name: 'daytona_read_file',
-    description: 'Read a file from the Daytona sandbox. Use this to inspect files in the actual running environment, check generated files, or debug issues.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Path to the file in the sandbox (relative to workspace root)',
-        },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'daytona_write_file',
-    description: 'Write a file to the Daytona sandbox. Use this to create or update files in the running environment.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Path where the file should be written in the sandbox',
-        },
-        content: {
-          type: 'string',
-          description: 'Content to write to the file',
-        },
-      },
-      required: ['path', 'content'],
-    },
-  },
-  {
-    name: 'daytona_list_files',
-    description: 'List files in the Daytona sandbox. Use this to explore the directory structure of the running environment.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Directory path to list (defaults to workspace root)',
-        },
-      },
-    },
-  },
-  {
-    name: 'daytona_get_preview_url',
-    description: 'Get the preview URL for the running application in the Daytona sandbox. Use this to provide the user with a link to view their application.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-    },
-  },
-  {
-    name: 'daytona_git_clone',
-    description: 'Clone a Git repository into the Daytona sandbox workspace.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        url: {
-          type: 'string',
-          description: 'Git repository URL',
-        },
-        path: {
-          type: 'string',
-          description: 'Target directory in sandbox',
-        },
-        branch: {
-          type: 'string',
-          description: 'Branch to clone (optional)',
-        },
-      },
-      required: ['url', 'path'],
-    },
-  },
-  {
-    name: 'daytona_get_workspace_status',
-    description: 'Get the status of the Daytona workspace (running, stopped, error, etc.). Use this to check if the workspace is ready before executing commands.',
-    input_schema: {
-      type: 'object',
-      properties: {},
-    },
-  },
-  {
-    name: 'ensure_workspace_running',
-    description: 'Ensure the Daytona workspace is running before performing operations. Automatically starts stopped workspaces and recovers errored ones. Use this if you get "workspace not running" errors or before critical operations.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        wait_for_ready: {
-          type: 'boolean',
-          description: 'Wait up to 60 seconds for workspace to reach running status (default: true)',
-        },
-      },
-    },
-  },
-  {
-    name: 'restart_workspace',
-    description: 'Explicitly restart the Daytona workspace. Use when you need a fresh environment (e.g., after changing environment variables, installing system packages, or persistent errors). For most errors, use ensure_workspace_running instead.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        reason: {
-          type: 'string',
-          description: 'Why the restart is needed (for logging and user communication)',
-        },
-      },
-    },
-  },
-  {
-    name: 'force_rebuild_workspace',
-    description: 'DESTRUCTIVE: Delete the workspace and create a new one from scratch. Only use when the sandbox is corrupted beyond repair (e.g., broken dependencies, filesystem errors that restart cannot fix). All running processes will be terminated. Files are preserved via VFS backup and will be restored.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        confirm: {
-          type: 'boolean',
-          description: 'Must be true to confirm this destructive operation',
-        },
-        reason: {
-          type: 'string',
-          description: 'Explain why force rebuild is necessary (required for audit trail)',
-        },
-      },
-      required: ['confirm', 'reason'],
-    },
-  },
-];
+// Re-export for compatibility
+export { AGENT_TOOLS, DAYTONA_TOOLS };
 
 interface AgentChatRequest {
   authorization: Header<'Authorization'>;
@@ -432,6 +29,7 @@ interface AgentChatRequest {
     role: 'user' | 'assistant';
     content: string | any[];
   }>;
+  model?: string;  // Optional: User-selected AI model
   tools?: any[];
   toolResult?: any;
   stream?: boolean;
@@ -492,7 +90,13 @@ export const agentChat = api(
       }
 
       // Fetch user's API key (encrypted) or fall back to system key
-      let apiKey = await getUserAnthropicKey(userId);
+      let apiKey: string | null = null;
+      try {
+        apiKey = await getUserAnthropicKey(userId);
+      } catch (error) {
+        console.warn('[Agent Chat] Failed to fetch user API key (likely encryption error):', error);
+        // Continue to fall back to system key
+      }
 
       if (!apiKey) {
         // Fall back to system-wide Anthropic API key from Encore secrets
@@ -514,12 +118,35 @@ export const agentChat = api(
 
       const relevantCode = await searchRelevantCode(projectId, userQuery);
 
+      const { mem0Manager } = await import('./memory/mem0-manager.js');
+
+      // MEM0 INTEGRATION - Retrieve context
+      let mem0Context = '';
+      try {
+        console.log('[Mem0] Searching for memories:', userQuery);
+        const memories = await mem0Manager.searchMemory(userId, userQuery);
+
+        if (memories && memories.length > 0) {
+          console.log(`[Mem0] Found ${memories.length} memories`);
+          mem0Context = memories.map((m: any) => `- ${m}`).join('\n');
+        }
+      } catch (error) {
+        console.warn('[Mem0] Failed to search memories:', error);
+      }
+
       // Build system prompt with project context
       let systemPrompt = `You are the Vaporform AI Code Engine, an expert coding assistant that generates complete, production-ready applications.
 
 # YOUR ROLE
 You are building project: "${project.name}"
 ${project.description ? `Description: ${project.description}` : ''}
+
+${mem0Context ? `# USER MEMORY & CONTEXT (from Mem0)
+The following insights are verified from previous interactions with this user:
+${mem0Context}
+
+Use these memories to personalize your response and maintain continuity.
+` : ''}
 
 ${relevantCode.length > 0 ? `# RELEVANT CODE (from semantic search)
 The following code snippets are semantically related to the user's request:
@@ -537,23 +164,66 @@ Use this existing code as context when responding to the user's request. Build u
 ---
 ` : ''}
 
-# ✅ VAPORFORM DAYTONA-FIRST WORKFLOW (ARCHITECTURAL REVERSAL)
-1. You write files DIRECTLY to the Daytona sandbox using write_to_file (immediately executable!)
-2. Files are automatically backed up to VFS (database) for persistence
-3. Install dependencies as you build using execute_command (npm install, pip install, etc.)
-4. Test your code in real-time - it's running in a live sandbox as you generate it!
-5. Start the dev server when ready using execute_command (npm run dev, python app.py, etc.)
-6. When done, use attempt_completion - Vaporform extracts the PUBLIC preview URL
-7. Preview URLs are publicly accessible - no authentication needed!
+# ✅ VAPORFORM DAYTONA-FIRST WORKFLOW
+1. **PLAN FIRST**: Use 'submit_implementation_plan' tool with your detailed plan in Markdown format.
+   - DO NOT echo or repeat the plan in your response text
+   - Just say: "I've submitted an implementation plan for your review."
+   - The tool will display the plan in a formatted card
+2. **WAIT FOR APPROVAL**: Do not proceed until the user approves the plan.
+3. **WRITE ALL FILES**: Once approved, write ALL project files using daytona_write_file
+4. **INSTALL DEPENDENCIES**: Run dependency installation (npm install, pip install -r requirements.txt)
+5. **START DEV SERVER IN BACKGROUND**: Use PTY session to run dev server asynchronously
+6. **GET PREVIEW URL**: Preview URL is available on ports 3000-9999 with listeners
+7. **COMPLETE**: Use 'attempt_completion' when done with preview URL
 
-# IMPORTANT RULES - DAYTONA-FIRST APPROACH
-- DO write files with write_to_file - they go to the live Daytona sandbox FIRST (immediately runnable)
-- DO install dependencies during generation using execute_command (npm install, pip install, etc.)
-- DO build the project if needed using execute_command (npm run build, etc.)
-- DO start the dev server when ready using execute_command (npm run dev, python app.py, etc.)
-- DO test your code as you build - the sandbox is live and running!
-- DO use attempt_completion when the application is fully generated and server is running
-- NEVER wait to install deps or start servers - do it during generation!
+# IMPORTANT RULES - DAYTONA WORKFLOW
+When working in the Daytona sandbox:
+- **WRITE ALL FILES FIRST**: Complete all file writing before installing dependencies or starting servers
+- **DO** install dependencies after writing files (npm install, pip install, etc.)
+- **DO** start dev server in BACKGROUND using PTY session (NOT regular execute_command)
+- **DO NOT** run production builds ('npm run build') - dev server handles everything
+- **DO NOT** use regular execute_command for long-running processes - use PTY sessions
+- **DO** use attempt_completion when dev server is running and preview URL is available
+
+# DEV SERVER WORKFLOW - PTY (Pseudo Terminal) API
+For starting development servers (npm run dev, python app.py, etc.):
+
+IMPORTANT: These tools use Daytona's PTY API for interactive execution.
+PTY API ≠ Sessions API (Sessions API is only for tracking processes, NOT executing them)
+
+Workflow:
+1. **Create PTY Handle**: daytona_create_session({session_id: "dev-server"})  
+   → Creates interactive PTY handle for command execution
+   
+2. **Execute Command**: daytona_session_exec({session_id: "dev-server", input: "cd /home/daytona && npm run dev\\n"})  
+   → Sends command to PTY (MUST include \\n at end!)
+   
+3. **Set Preview Port**: daytona_set_preview_port({port: 5173})  
+   → Configures which port to use for preview URL
+   
+4. **Get Preview URL**: daytona_get_preview_url()  
+   → Returns {url, token, port} from Daytona SDK
+
+5. **Verify**: daytona_get_workspace_status()  
+   → Check detected_ports array to confirm server is running
+
+Common framework ports:
+- Vite/React: 5173 | Next.js/CRA: 3000 | Vue CLI: 8080
+- Angular: 4200 | Django: 8000 | Flask: 5000 | Astro: 4321
+
+CRITICAL: Always append \\n to commands in daytona_session_exec
+CRITICAL: Call daytona_set_preview_port BEFORE daytona_get_preview_url
+
+
+# ERROR HANDLING - CRITICAL
+When encountering errors, handle them intelligently and continue progress:
+- **"File not found"**: The file doesn't exist yet - CREATE it using daytona_write_file instead of retrying the read
+- **"Directory not found"**: Create parent directories first using execute_command (mkdir -p path/to/dir)
+- **"Command not found"**: Install the required package/tool first (npm install -g, apt-get install, etc.)
+- **"Module not found"**: Install dependencies (npm install, pip install) before running
+- **"Permission denied"**: Check file permissions or use appropriate commands (chmod, sudo if needed)
+- **NEVER** repeat the same failing operation - analyze the error and take corrective action
+- **ALWAYS** move forward - errors are expected in development, handle them and proceed
 
 # AVAILABLE TOOLS
 
@@ -565,14 +235,67 @@ Use this existing code as context when responding to the user's request. Build u
 - ask_followup_question: Ask the user for clarification (use sparingly)
 - attempt_completion: Mark the project as complete (required when done)
 
-## Daytona Sandbox Tools (for testing and debugging):
-- daytona_execute_command: Execute shell commands in the live Daytona sandbox
-- daytona_read_file: Read files from the running sandbox environment
-- daytona_write_file: Write files to the running sandbox
-- daytona_list_files: List files in the sandbox
-- daytona_get_preview_url: Get the live preview URL for the application
-- daytona_git_clone: Clone Git repositories into the sandbox
-- daytona_get_workspace_status: Check if the Daytona workspace is running
+## **Daytona Sandbox Tools (for code execution in isolated environment):**
+- daytona_execute_command: Execute shell commands in the sandbox
+- daytona_read_file: Read file contents from sandbox
+- daytona_write_file: Write/update files in sandbox
+- daytona_list_files: List directory contents in sandbox
+- daytona_set_preview_port: **CRITICAL: Set preview port immediately after detecting dev server port**
+- daytona_get_preview_url: Get live preview URL for the application
+- daytona_git_clone: Clone a Git repository into sandbox
+- daytona_get_workspace_status: Check if sandbox is running
+
+**Preview URL Workflow (IMPORTANT):**
+When starting a dev server, follow this exact sequence:
+1. Start dev server in background: daytona_execute_command with "npm run dev &" or similar
+2. Parse command output to detect the port (e.g., "Local: http://localhost:5173/" = port 5173)
+3. Immediately call daytona_set_preview_port with the detected port number
+4. Then call daytona_get_preview_url to get the shareable preview link
+5. Provide the preview URL to the user
+
+Common ports: Vite=5173, Next.js=3000, Angular=4200, Django=8000, Flask=5000
+
+## 🔍 CRITICAL: Result Verification Protocol
+
+**When tools return success but don't have expected effect:**
+1. ✅ **Verify** - Call the getter tool again to confirm change persisted
+2. ❌ **Detect Inconsistency** - If results don't match what you just set, STOP
+3. 🐛 **Debug First** - Check logs, don't create workarounds
+4. ❓ **Ask User** - Use ask_followup_question to report the tool bug
+
+**Example of what to do:**
+\`\`\`
+set_preview_port(5173) → success
+get_preview_url() → port 3000  ← INCONSISTENT!
+
+❌ DON'T: Build proxy server to forward 3000 → 5173
+✅ DO: Tell user "Tool bug detected: set_preview_port succeeded but get_preview_url still returns port 3000. The correct URL should be https://5173-[id].proxy.daytona.works"
+\`\`\`
+
+**Red Flags (tool may have failed silently):**
+- Tool returns success but state doesn't change
+- Setter/getter tools return different values
+- File writes succeed but reads show old content
+
+## 🛠️ Problem-Solving Hierarchy
+
+When encountering issues, follow this order:
+
+1. **Verify First** - Confirm tool actually worked (call getter after setter)
+2. **Report Bugs** - If tool failed, tell user the bug (don't workaround)
+3. **Simple Solutions** - Prefer: config change > code change > installing packages
+4. **Last Resort** - Only create workarounds if user explicitly requests
+
+**Bad Example:**
+\`\`\`
+Port mismatch → Install http-proxy → Create proxy server → Forward traffic
+(10+ tool calls, wasteful)
+\`\`\`
+
+**Good Example:**
+\`\`\`
+Port mismatch → Tell user correct URL (1 message, helpful)
+\`\`\`
 
 ## ✅ HOW FILE OPERATIONS WORK (DAYTONA-FIRST)
 When you use **write_to_file**:
@@ -643,14 +366,60 @@ If you encounter "workspace not running" errors or operations fail:
       // Combine VFS tools and Daytona tools
       const allTools = [...AGENT_TOOLS, ...DAYTONA_TOOLS];
 
+      // Fetch user settings for model preference via Users Service API
+      const { getUserSettings } = await import('../users/settings-api.js');
+      const { settings } = await getUserSettings({ authorization: req.authorization });
+
+      // Priority: Request model > User settings > Default (latest Sonnet 4.5)
+      let selectedModel = req.model || settings?.aiModel || 'claude-sonnet-4-5-20250929';
+
+      // Automatically upgrade deprecated models to current default
+      const deprecatedModels = ['claude-3-5-sonnet-20240620', 'claude-3-5-sonnet-20241022'];
+      if (deprecatedModels.includes(selectedModel)) {
+        console.warn(`[Agent Chat] Upgrading deprecated model ${selectedModel} to claude-sonnet-4-5-20250929`);
+        selectedModel = 'claude-sonnet-4-5-20250929';
+      }
+
+      console.log('[Agent Chat] Using model:', selectedModel);
+
       // Call Anthropic API with tools
       const response = await anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
+        model: selectedModel,
         max_tokens: 8192,
         system: systemPrompt,
         messages: anthropicMessages,
         tools: allTools,
       });
+
+      // MEM0 INTEGRATION - Save interaction
+      if (response.content) {
+        try {
+          const { mem0Manager } = await import('./memory/mem0-manager.js');
+
+          let aiText = '';
+          if (typeof response.content === 'string') {
+            aiText = response.content;
+          } else if (Array.isArray(response.content)) {
+            // Extract text from content blocks
+            aiText = response.content
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text)
+              .join('\n');
+          }
+
+          if (aiText) {
+            console.log('[Mem0] Saving interaction...');
+            // We fire and forget this promise to not block the response
+            mem0Manager.addMemory(userId, `User Request: ${userQuery}\n\nAI Response: ${aiText}`)
+              .then(() => console.log('[Mem0] Interaction saved'))
+              .catch(err => {
+                console.error('[Mem0] Failed to save interaction:', err instanceof Error ? err.message : String(err));
+              });
+          }
+        } catch (error) {
+          console.error('[Mem0] Error saving interaction:', error instanceof Error ? error.message : String(error));
+        }
+      }
 
       return {
         content: response.content,
@@ -661,15 +430,26 @@ If you encounter "workspace not running" errors or operations fail:
         },
       };
     } catch (error) {
-      console.error('Error in agent chat:', error);
-      // Convert to ValidationError (VaporformError type) before passing to toAPIError
+      // Convert specific Anthropic errors
+      if (error instanceof Error && error.name === 'AuthenticationError') {
+        // Log the full error but return a clean message
+        console.error('Anthropic Auth Error:', error);
+        throw new ValidationError('AI Service Authentication Failed. Please check your API key settings.');
+      }
+
       const err = error instanceof ValidationError ? error : new ValidationError(
         error instanceof Error ? error.message : 'Failed to process agent chat'
       );
+      console.error('[Agent Chat] Final API Error:', {
+        message: err.message,
+        details: err.details,
+        stack: error instanceof Error ? error.stack : undefined
+      });
       throw toAPIError(err);
     }
   }
 );
+
 
 /**
  * Get tool definitions for the agent
@@ -698,15 +478,23 @@ export const executeDaytonaTool = api(
     toolName: string;
     toolInput: any;
   }): Promise<{ success: boolean; result?: any; error?: string }> => {
-    const { userId } = await verifyClerkJWT(authorization);
-    const id = BigInt(projectId);
+    console.log(`[Tool Exec] Request: ${toolName} for project ${projectId}`, JSON.stringify(toolInput).substring(0, 200));
 
-    await ensureProjectPermission(userId, id, 'view');
+    try {
+      const { userId } = await verifyClerkJWT(authorization);
+      const id = BigInt(projectId);
 
-    const { executeDaytonaTool: executeToolHandler } = await import('./daytona-tools.js');
-    const result = await executeToolHandler(toolName, toolInput, id);
+      await ensureProjectPermission(userId, id, 'view');
 
-    return result;
+      const { executeDaytonaTool: executeToolHandler } = await import('./daytona-tools.js');
+      const result = await executeToolHandler(toolName, toolInput, id);
+
+      console.log(`[Tool Exec] Success: ${toolName}`, result.success ? 'OK' : 'Failed');
+      return result;
+    } catch (error) {
+      console.error(`[Tool Exec] Failed: ${toolName}`, error);
+      throw error;
+    }
   }
 );
 
@@ -834,3 +622,49 @@ async function searchRelevantCode(
     return [];
   }
 }
+
+// List available AI models
+interface ListModelsResponse {
+  models: Array<{
+    id: string;
+    name: string;
+    description: string;
+    provider: string;
+  }>;
+}
+
+export const listAvailableModels = api(
+  { method: 'GET', path: '/ai/models' },
+  async (req: { authorization: Header<'Authorization'> }): Promise<ListModelsResponse> => {
+    await verifyClerkJWT(req.authorization);
+
+    return {
+      models: [
+        {
+          id: 'claude-opus-4-5-20251124',
+          name: 'Claude Opus 4.5',
+          description: 'Most powerful model - advanced reasoning (Nov 2025)',
+          provider: 'anthropic'
+        },
+        {
+          id: 'claude-sonnet-4-5-20250929',
+          name: 'Claude Sonnet 4.5',
+          description: 'Latest balanced model - best overall (Sept 2025)',
+          provider: 'anthropic'
+        },
+        {
+          id: 'claude-haiku-4-5-20251015',
+          name: 'Claude Haiku 4.5',
+          description: 'Fastest and most cost-efficient (Oct 2025)',
+          provider: 'anthropic'
+        },
+        {
+          id: 'claude-3-5-sonnet-20241022',
+          name: 'Claude 3.5 Sonnet',
+          description: 'Previous generation - stable (Oct 2024)',
+          provider: 'anthropic'
+        }
+      ]
+    };
+  }
+);

@@ -681,7 +681,7 @@ Now we'll connect Claude to our Daytona sandbox using tool calling. This allows 
 
     ```python
     msg = anthropic.messages.create(
-        model='claude-3-5-sonnet-20240620',
+        model='claude-sonnet-4-5-20250929',
         max_tokens=1024,
         messages=[{'role': 'user', 'content': prompt}],
         tools=[
@@ -705,7 +705,7 @@ Now we'll connect Claude to our Daytona sandbox using tool calling. This allows 
 
     ```typescript
     const msg = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20240620',
+      model: 'claude-sonnet-4-5-20250929',
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
       tools: [
@@ -820,7 +820,7 @@ Here are the complete, ready-to-run examples:
         anthropic = Anthropic()
         print('Waiting for the model response...')
         msg = anthropic.messages.create(
-            model='claude-3-5-sonnet-20240620',
+            model='claude-sonnet-4-5-20250929',
             max_tokens=1024,
             messages=[{'role': 'user', 'content': prompt}],
             tools=[
@@ -1801,7 +1801,7 @@ The following snippet connects to an LLM using the Anthropic API and asks Claude
             "Content-Type": "application/json"
         }
         data = {
-            "model": "claude-3-7-sonnet-latest",
+            "model": "claude-sonnet-4-5-20250929",
             "max_tokens": 256,
             "messages": [{"role": "user", "content": prompt}]
         }
@@ -1858,7 +1858,7 @@ The following snippet connects to an LLM using the Anthropic API and asks Claude
         "Content-Type": "application/json"
       }
       const data = {
-        "model": "claude-3-7-sonnet-latest",
+        "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 256,
         "messages": [{"role": "user", "content": prompt}]
       }
