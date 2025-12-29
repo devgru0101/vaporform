@@ -321,33 +321,72 @@ export class BuildManager {
       let stdoutBuffer = '';
       let stderrBuffer = '';
 
-      await sandbox.process.getSessionCommandLogs(
-        sessionId,
-        cmdId,
-        (chunk: string) => {
-          stdoutBuffer += chunk;
-          console.log(`[BUILD ${buildId}] [STDOUT]`, chunk);
+      try {
+        // Attempt WebSocket log streaming (may fail with SSL errors)
+        await sandbox.process.getSessionCommandLogs(
+          sessionId,
+          cmdId,
+          (chunk: string) => {
+            stdoutBuffer += chunk;
+            console.log(`[BUILD ${buildId}] [STDOUT]`, chunk);
 
-          // Update live output in database
-          this.updateLiveOutput(buildId, chunk, logType).catch(err =>
-            console.error(`Failed to update live output:`, err)
-          );
-        },
-        (chunk: string) => {
-          stderrBuffer += chunk;
-          console.log(`[BUILD ${buildId}] [STDERR]`, chunk);
+            // Update live output in database
+            this.updateLiveOutput(buildId, chunk, logType).catch(err =>
+              console.error(`Failed to update live output:`, err)
+            );
+          },
+          (chunk: string) => {
+            stderrBuffer += chunk;
+            console.log(`[BUILD ${buildId}] [STDERR]`, chunk);
 
-          // Log errors as build events
-          this.addBuildEvent(buildId, 'error', undefined, chunk).catch(err =>
-            console.error(`Failed to add error event:`, err)
-          );
+            // Log errors as build events
+            this.addBuildEvent(buildId, 'error', undefined, chunk).catch(err =>
+              console.error(`Failed to add error event:`, err)
+            );
 
-          // PRIORITY 1 FIX: Forward errors to context manager for terminal agent
-          this.forwardBuildError(buildId, projectId, chunk, logType).catch(err =>
-            console.error(`Failed to forward build error to context manager:`, err)
-          );
+            // PRIORITY 1 FIX: Forward errors to context manager for terminal agent
+            this.forwardBuildError(buildId, projectId, chunk, logType).catch(err =>
+              console.error(`Failed to forward build error to context manager:`, err)
+            );
+          }
+        );
+      } catch (wsError) {
+        // WebSocket streaming failed (common with SSL/TLS errors)
+        // Fall back to polling for command completion
+        console.warn(`[BUILD ${buildId}] WebSocket log streaming failed, falling back to polling:`, wsError instanceof Error ? wsError.message : 'Unknown');
+
+        // Wait for command to complete by polling
+        let completed = false;
+        let attempts = 0;
+        const maxAttempts = 60; // 60 attempts * 2s = 2 minutes max
+
+        while (!completed && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Poll every 2s
+
+          try {
+            const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
+
+            if (cmd.exitCode !== null && cmd.exitCode !== undefined) {
+              completed = true;
+
+              // Collect any output that might be available
+              if (cmd.stdout) stdoutBuffer += cmd.stdout;
+              if (cmd.stderr) stderrBuffer += cmd.stderr;
+
+              console.log(`[BUILD ${buildId}] Command completed with exit code: ${cmd.exitCode}`);
+              break;
+            }
+          } catch (pollError) {
+            console.warn(`[BUILD ${buildId}] Polling attempt ${attempts + 1} failed:`, pollError);
+          }
+
+          attempts++;
         }
-      );
+
+        if (!completed) {
+          console.error(`[BUILD ${buildId}] Command did not complete within timeout`);
+        }
+      }
 
       // Get final command status
       const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);

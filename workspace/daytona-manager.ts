@@ -45,9 +45,9 @@ export class DaytonaManager implements DaytonaContext {
         try {
           this.daytona = new Daytona({
             apiKey: apiKey,
-            serverUrl: apiUrl || 'https://app.daytona.io/api',
+            apiUrl: apiUrl || 'https://app.daytona.io/api',
           });
-          console.log(`[DAYTONA INIT] Daytona SDK initialized`);
+          console.log(`[DAYTONA INIT] Daytona SDK initialized with apiUrl: ${apiUrl || 'https://app.daytona.io/api'}`);
         } catch (err) {
           console.error(`[DAYTONA INIT] Failed to initialize Daytona SDK:`, err);
           this.daytona = null;

@@ -3,7 +3,7 @@ import { Daytona } from '@daytonaio/sdk';
 
 // SECURITY: Never hardcode API keys - use environment variables
 const apiKey = process.env.DAYTONA_API_KEY || '';
-const serverUrl = process.env.DAYTONA_API_URL || 'https://app.daytona.io/api';
+const apiUrl = process.env.DAYTONA_API_URL || 'https://app.daytona.io/api';
 
 async function main() {
     if (!apiKey) {
@@ -13,7 +13,7 @@ async function main() {
     }
 
     console.log('Testing Daytona API Key...');
-    const daytona = new Daytona({ apiKey, serverUrl });
+    const daytona = new Daytona({ apiKey, apiUrl });
 
     try {
         console.log('Attempting to list workspaces...');

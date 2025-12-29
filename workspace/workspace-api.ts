@@ -12,103 +12,29 @@ import { buildManager } from './build-manager.js';
 import { syncManager } from './sync-manager.js';
 import { ValidationError, toAPIError } from '../shared/errors.js';
 import { db as projectDB } from '../projects/db.js';
+import { db as aiDB } from '../ai/db.js'; // For chat session/message creation
 
 /**
- * Helper function to trigger auto-build if needed
- * Checks if project needs a build and triggers it asynchronously
+ * AUTO-BUILD DISABLED: Builds are now agent-driven only
+ *
+ * Previously this function would automatically trigger builds after workspace creation.
+ * This caused issues:
+ * - Only worked for Node.js (hardcoded npm install)
+ * - No support for Python, Go, Rust, etc.
+ * - No user feedback in chat
+ * - Complex WebSocket streaming caused SSL errors
+ *
+ * NEW WORKFLOW:
+ * 1. Force rebuild deploys files to sandbox
+ * 2. User asks agent in chat: "Please analyze project and start dev server"
+ * 3. Agent detects tech stack, runs appropriate commands, provides feedback
+ *
+ * The agent can still use the build system via the startProjectBuild endpoint.
  */
 async function triggerAutoBuildIfNeeded(projectId: bigint, workspaceId: bigint): Promise<void> {
-  try {
-    // Check if project needs auto-build
-    const builds = await buildManager.listBuilds(projectId, 1);
-
-    // Trigger build if no builds exist OR last build failed OR last successful build is old
-    let shouldBuild = false;
-
-    if (builds.length === 0) {
-      console.log(`[Auto-Build] No builds found for project ${projectId}, triggering initial build`);
-      shouldBuild = true;
-    } else {
-      const lastBuild = builds[0];
-
-      if (lastBuild.status === 'failed') {
-        // Check if we have CONSECUTIVE failures (last 2 builds both failed)
-        // If yes, skip to avoid infinite retry loop
-        // If only last build failed, try once more (agent may have fixed issues)
-        if (builds.length >= 2 && builds[1].status === 'failed') {
-          console.log(`[Auto-Build] Multiple consecutive build failures for project ${projectId}, skipping auto-rebuild`);
-          console.log(`[Auto-Build] User/agent should explicitly fix build issues and rebuild`);
-          shouldBuild = false;
-        } else {
-          console.log(`[Auto-Build] Last build failed for project ${projectId}, but will retry once (single failure)`);
-          shouldBuild = true;
-        }
-      } else if (lastBuild.status === 'building' || lastBuild.status === 'pending') {
-        console.log(`[Auto-Build] Build already in progress for project ${projectId}`);
-        shouldBuild = false;
-      } else if (lastBuild.status === 'success') {
-        // Don't auto-rebuild if successful build within last hour
-        const hourAgo = Date.now() - (60 * 60 * 1000);
-        const completedAt = lastBuild.completed_at ? lastBuild.completed_at.getTime() : 0;
-
-        if (completedAt > hourAgo) {
-          console.log(`[Auto-Build] Recent successful build exists for project ${projectId}, skipping`);
-          shouldBuild = false;
-        } else {
-          console.log(`[Auto-Build] Last successful build is old for project ${projectId}, triggering rebuild`);
-          shouldBuild = true;
-        }
-      }
-    }
-
-    if (shouldBuild) {
-      // CRITICAL: Check if project has any code files before building
-      // Prevents "build failed" on empty/newly-created projects
-      console.log(`[Auto-Build] Checking if project ${projectId} has code files...`);
-
-      try {
-        const filesResult = await daytonaManager.executeCommand(workspaceId,
-          'find . -type f \\( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.go" -o -name "*.java" -o -name "*.rb" -o -name "*.php" -o -name "package.json" -o -name "requirements.txt" -o -name "go.mod" -o -name "Gemfile" -o -name "composer.json" \\) | head -10'
-        );
-
-        const hasCodeFiles = filesResult.stdout && filesResult.stdout.trim().length > 0;
-
-        if (!hasCodeFiles) {
-          console.log(`[Auto-Build] Project ${projectId} has no code files yet, skipping build`);
-          console.log(`[Auto-Build] User should add code before building`);
-          shouldBuild = false;
-        } else {
-          console.log(`[Auto-Build] Project ${projectId} has code files, proceeding with build`);
-        }
-      } catch (error) {
-        console.warn(`[Auto-Build] Failed to check for code files:`, error);
-        // If check fails, err on the side of NOT building to avoid false "build failed" 
-        console.log(`[Auto-Build] Skipping build due to file check failure`);
-        shouldBuild = false;
-      }
-    }
-
-    if (shouldBuild) {
-      console.log(`[Auto-Build] Triggering auto-build for project ${projectId}`);
-
-      // Create and start build (BuildManager handles queue/mutex)
-      const build = await buildManager.createBuild(projectId, workspaceId, {
-        trigger: 'auto',
-        initiatedBy: 'workspace_access',
-        timestamp: new Date().toISOString()
-      });
-
-      // Start build in background (don't await)
-      buildManager.startBuild(build.id).catch(err => {
-        console.error(`[Auto-Build] Build ${build.id} failed:`, err);
-      });
-
-      console.log(`[Auto-Build] Build ${build.id} started for project ${projectId}`);
-    }
-  } catch (error) {
-    console.error(`[Auto-Build] Error checking/triggering auto-build:`, error);
-    // Don't throw - auto-build failures shouldn't block workspace URL retrieval
-  }
+  console.log('[Auto-Build] ⚠️  Auto-build is DISABLED - builds must be triggered by agent via chat');
+  console.log('[Auto-Build] To build, ask agent: "Please analyze the project and start the dev server"');
+  return; // Do nothing - agent handles builds
 }
 
 interface CreateWorkspaceRequest {
@@ -496,11 +422,12 @@ export const getProjectWorkspace = api(
       console.log(`[Auto-Build] Project ID: ${projectId}`);
       console.log(`[Auto-Build] Workspace ID: ${workspace.id}`);
       console.log(`[Auto-Build] Workspace Status: ${workspace.status}`);
-      console.log(`[Auto-Build] Calling triggerAutoBuildIfNeeded()...`);
-
-      triggerAutoBuildIfNeeded(projectId, workspace.id).catch(err => {
-        console.error(`[Auto-Build] ❌ Failed to trigger auto-build:`, err);
-      });
+      // AUTO-BUILD DISABLED: Agent handles builds via chat
+      // Previously triggered automatic npm install here
+      // console.log(`[Auto-Build] Calling triggerAutoBuildIfNeeded()...`);
+      // triggerAutoBuildIfNeeded(projectId, workspace.id).catch(err => {
+      //   console.error(`[Auto-Build] ❌ Failed to trigger auto-build:`, err);
+      // });
 
       console.log(`[Auto-Build] Auto-build trigger initiated (non-blocking)`);
     } else {
@@ -710,6 +637,90 @@ async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bi
           // Deploy files with buildId for progress events
           const result = await daytonaManager.deployProjectFromVFS(workspaceId, projectId, undefined, build.id);
           log.info('Force Rebuild deployed files successfully', { filesDeployed: result.filesDeployed, workspaceId, projectId });
+
+          // Auto-trigger agent to analyze and build project
+          if (result.filesDeployed > 0) {
+            log.info('Force Rebuild triggering agent for auto-build', { workspaceId, projectId, buildId: build.id });
+
+            try {
+              // Get or create a chat session for this project
+              const chatSessions = await aiDB.query<{ id: bigint, user_id: string }>`
+                SELECT id, user_id FROM chat_sessions 
+                WHERE project_id = ${projectId} 
+                  AND status = 'active'
+                ORDER BY last_activity_at DESC
+                LIMIT 1
+              `;
+
+              let sessionId: bigint;
+              let userId: string;
+
+              if (chatSessions.length > 0) {
+                sessionId = chatSessions[0].id;
+                userId = chatSessions[0].user_id;
+                log.info('Force Rebuild using existing chat session', { sessionId, projectId });
+              } else {
+                // Get project owner to create session for them
+                const project = await projectDB.queryRow<{ user_id: string }>`
+                  SELECT user_id FROM projects WHERE id = ${projectId}
+                `;
+
+                if (!project) {
+                  throw new Error(`Project ${projectId} not found`);
+                }
+
+                userId = project.user_id;
+
+                // Create new session
+                const newSession = await aiDB.queryRow<{ id: bigint }>`
+                  INSERT INTO chat_sessions (project_id, user_id, session_type, title, status, created_at, last_activity_at)
+                  VALUES (${projectId}, ${userId}, 'hybrid', 'Auto-Build Session', 'active', NOW(), NOW())
+                  RETURNING id
+                `;
+
+                if (!newSession) {
+                  throw new Error('Failed to create chat session');
+                }
+
+                sessionId = newSession.id;
+                log.info('Force Rebuild created new chat session', { sessionId, projectId, userId });
+              }
+
+              // Send automatic message to agent requesting build
+              const agentMessage = `🚀 **Force Rebuild Complete**
+
+${result.filesDeployed} files have been deployed to the Daytona sandbox (workspace ID: ${workspaceId}).
+
+**Please help build this project:**
+1. Analyze the project files to detect the tech stack (check for package.json, requirements.txt, go.mod, Cargo.toml, etc.)
+2. Install dependencies using the appropriate command for the detected tech stack
+3. Start the dev server (ensure it listens on 0.0.0.0, not just localhost)
+4. Report the preview URL when ready
+
+Use the Daytona tools available to you (\`daytona_list_files\`, \`daytona_read_file\`, \`daytona_execute_command\`, \`daytona_create_session\`, etc.)
+
+Build ID: ${build.id}`;
+
+              // Add system message to session
+              await aiDB.exec`
+                INSERT INTO chat_messages (session_id, role, content, agent_type, created_at)
+                VALUES (${sessionId}, 'user', ${agentMessage}, 'system', NOW())
+              `;
+
+              log.info('Force Rebuild sent auto-build message to agent', { sessionId, workspaceId, projectId, buildId: build.id });
+
+              // NOTE: The agent will see this message when the user opens the chat UI
+              // For fully automatic execution, we would need to call the agent's API endpoint here
+              // But that would require handling streaming responses and error recovery
+              // Current approach: Message is waiting in chat for agent to process
+
+            } catch (agentError) {
+              log.error('Force Rebuild failed to trigger agent', { error: agentError, workspaceId, projectId });
+              // Don't throw - deployment was successful even if agent trigger failed
+            }
+          } else {
+            log.info('Force Rebuild no files deployed - skipping agent trigger', { workspaceId, filesDeployed: result.filesDeployed });
+          }
 
           return;
         } catch (deployError) {
@@ -1064,10 +1075,10 @@ export const getSandboxUrl = api(
     // Sync status with Daytona API before getting URL
     workspace = await daytonaManager.syncWorkspaceStatus(workspaceId);
 
-    // Trigger auto-build if needed (non-blocking)
-    triggerAutoBuildIfNeeded(workspace.project_id, workspaceId).catch(err => {
-      console.error(`[Auto-Build] Failed to trigger auto-build:`, err);
-    });
+    // Trigger auto-build if needed    // AUTO-BUILD DISABLED: Agent handles builds via chat
+    // triggerAutoBuildIfNeeded(workspace.project_id, workspaceId).catch(err => {
+    //   console.error('[Auto-Build] Failed to trigger auto-build:', err);
+    // });
 
     const previewInfo = await daytonaManager.getSandboxUrl(workspaceId);
 
@@ -1485,18 +1496,29 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Client } from 'ssh2';
 
 // Create WebSocket server for SSH terminal on port 4003 (singleton pattern for hot reload)
+// Use global to persist across hot reloads
+declare global {
+  var __sshWss: WebSocketServer | undefined;
+}
+
 let sshWss: WebSocketServer;
-try {
-  // Check if port is already in use (from previous hot reload)
-  sshWss = new WebSocketServer({ port: 4003 });
-  console.log('✓ WebSocket SSH proxy server listening on port 4003');
-} catch (error: any) {
-  if (error.code === 'EADDRINUSE') {
-    console.log('⚠ WebSocket SSH proxy already running on port 4003 (hot reload detected)');
-    // Create a dummy server reference - the old one will handle connections
-    sshWss = new WebSocketServer({ noServer: true });
-  } else {
-    throw error;
+
+if (global.__sshWss) {
+  console.log('⚠ WebSocket SSH proxy reusing existing server on port 4003 (hot reload detected)');
+  sshWss = global.__sshWss;
+} else {
+  try {
+    sshWss = new WebSocketServer({ port: 4003 });
+    global.__sshWss = sshWss;
+    console.log('✓ WebSocket SSH proxy server listening on port 4003');
+  } catch (error: any) {
+    if (error.code === 'EADDRINUSE') {
+      console.log('⚠ WebSocket SSH proxy port conflict - using noServer mode');
+      // Create a dummy server reference
+      sshWss = new WebSocketServer({ noServer: true });
+    } else {
+      throw error;
+    }
   }
 }
 

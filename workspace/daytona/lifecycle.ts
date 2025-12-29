@@ -294,6 +294,7 @@ export class DaytonaLifecycle {
     }
 
     async getProjectWorkspace(projectId: bigint): Promise<Workspace | null> {
+        console.log(`[getProjectWorkspace] Querying for project ${projectId}`);
         let workspace = await db.queryRow<Workspace>`
       SELECT * FROM workspaces
       WHERE project_id = ${projectId}
@@ -302,7 +303,9 @@ export class DaytonaLifecycle {
       LIMIT 1
     `;
 
+        console.log(`[getProjectWorkspace] Query result:`, workspace ? `Found workspace ${workspace.id}` : 'NO WORKSPACE FOUND');
         if (workspace) {
+            console.log(`[getProjectWorkspace] Workspace details: id=${workspace.id}, status=${workspace.status}, daytona_sandbox_id=${workspace.daytona_sandbox_id}`);
             try {
                 workspace = await this.syncWorkspaceStatus(workspace.id);
             } catch (error) {
