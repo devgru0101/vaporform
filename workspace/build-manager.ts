@@ -364,7 +364,7 @@ export class BuildManager {
           await new Promise(resolve => setTimeout(resolve, 2000)); // Poll every 2s
 
           try {
-            const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
+            const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId) as any;
 
             if (cmd.exitCode !== null && cmd.exitCode !== undefined) {
               completed = true;

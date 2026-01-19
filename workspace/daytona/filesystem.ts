@@ -263,7 +263,7 @@ Error details: ${errorMsg}`;
             // Fallback to shell - find by pattern
             const result = await sandbox.process.executeCommand(`find "${relativeDir}" -name "${pattern}" 2>/dev/null || true`);
             const output = result.stdout || result.result || '';
-            return output.trim().split('\n').filter(line => line.length > 0);
+            return output.trim().split('\n').filter((line: string) => line.length > 0);
         }
     }
 
@@ -326,7 +326,7 @@ Error details: ${errorMsg}`;
             // Fallback to shell - use find with glob pattern
             const result = await sandbox.process.executeCommand(`find "${relativeDir}" -path "${globPattern}" 2>/dev/null || true`);
             const output = result.stdout || result.result || '';
-            return output.trim().split('\n').filter(line => line.length > 0);
+            return output.trim().split('\n').filter((line: string) => line.length > 0);
         }
     }
 }

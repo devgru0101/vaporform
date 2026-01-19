@@ -644,13 +644,19 @@ async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bi
 
             try {
               // Get or create a chat session for this project
-              const chatSessions = await aiDB.query<{ id: bigint, user_id: string }>`
-                SELECT id, user_id FROM chat_sessions 
-                WHERE project_id = ${projectId} 
+              const chatSessionsQuery = aiDB.query<{ id: bigint, user_id: string }>`
+                SELECT id, user_id FROM chat_sessions
+                WHERE project_id = ${projectId}
                   AND status = 'active'
                 ORDER BY last_activity_at DESC
                 LIMIT 1
               `;
+
+              // Collect results from AsyncGenerator
+              const chatSessions: { id: bigint, user_id: string }[] = [];
+              for await (const session of chatSessionsQuery) {
+                chatSessions.push(session);
+              }
 
               let sessionId: bigint;
               let userId: string;
