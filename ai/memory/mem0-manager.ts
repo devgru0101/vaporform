@@ -6,8 +6,7 @@
 import { MemoryClient } from 'mem0ai';
 import { secret } from 'encore.dev/config';
 
-// Define Mem0 secrets
-// Note: User provided key: m0-mP3vIRX3uETM6CpXdTquDbHHbsowZ2OsDclgPXc2
+// Define Mem0 secrets - configured via Encore secrets manager
 const mem0APIKey = secret("Mem0APIKey");
 
 export class Mem0Manager {

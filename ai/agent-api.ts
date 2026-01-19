@@ -134,12 +134,19 @@ export const agentChat = api(
         console.warn('[Mem0] Failed to search memories:', error);
       }
 
+      // Import prompt sanitization
+      const { sanitizeForPrompt } = await import('../shared/validation.js');
+
+      // Sanitize project data to prevent prompt injection
+      const sanitizedName = sanitizeForPrompt(project.name, 100);
+      const sanitizedDescription = project.description ? sanitizeForPrompt(project.description, 500) : '';
+
       // Build system prompt with project context
       let systemPrompt = `You are the Vaporform AI Code Engine, an expert coding assistant that generates complete, production-ready applications.
 
 # YOUR ROLE
-You are building project: "${project.name}"
-${project.description ? `Description: ${project.description}` : ''}
+You are building project: "${sanitizedName}"
+${sanitizedDescription ? `Description: ${sanitizedDescription}` : ''}
 
 ${mem0Context ? `# USER MEMORY & CONTEXT (from Mem0)
 The following insights are verified from previous interactions with this user:
@@ -347,9 +354,10 @@ If you encounter "workspace not running" errors or operations fail:
 
 **Note**: Most operations will work fine without these tools. Only use them if you actually encounter errors.`;
 
-      // Add wizard data if available
+      // Add wizard data if available (sanitize to prevent prompt injection)
       if (wizardData) {
-        systemPrompt += `\n\n# PROJECT REQUIREMENTS (from wizard)\n${JSON.stringify(wizardData, null, 2)}`;
+        const sanitizedWizardData = sanitizeForPrompt(JSON.stringify(wizardData, null, 2), 2000);
+        systemPrompt += `\n\n# PROJECT REQUIREMENTS (from wizard)\n${sanitizedWizardData}`;
       }
 
       systemPrompt += `\n\nNow, create the complete application based on the user's requirements. Start by creating all necessary files.`;
@@ -360,8 +368,8 @@ If you encounter "workspace not running" errors or operations fail:
         content: typeof msg.content === 'string' ? msg.content : msg.content,
       }));
 
-      console.log('[Agent Chat] Messages from frontend:', JSON.stringify(req.messages, null, 2));
-      console.log('[Agent Chat] Final messages to Anthropic:', JSON.stringify(anthropicMessages, null, 2));
+      // Avoid logging full message content - may contain sensitive data
+      console.log('[Agent Chat] Processing messages, count:', anthropicMessages.length);
 
       // Combine VFS tools and Daytona tools
       const allTools = [...AGENT_TOOLS, ...DAYTONA_TOOLS];

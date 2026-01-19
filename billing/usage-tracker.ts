@@ -53,6 +53,9 @@ interface BillingCycle {
   created_at: Date;
 }
 
+// Valid resource types
+const VALID_RESOURCE_TYPES: ResourceType[] = ['storage', 'compute', 'ai_tokens', 'bandwidth'];
+
 export class UsageTracker {
   /**
    * Record usage for a resource
@@ -66,6 +69,16 @@ export class UsageTracker {
     periodStart: Date = new Date(),
     periodEnd: Date = new Date()
   ): Promise<UsageRecord> {
+    // Validate amount is positive
+    if (amount <= BigInt(0)) {
+      throw new Error('Usage amount must be positive');
+    }
+
+    // Validate resource type
+    if (!VALID_RESOURCE_TYPES.includes(resourceType)) {
+      throw new Error(`Invalid resource type: ${resourceType}`);
+    }
+
     const record = await db.queryRow<UsageRecord>`
       INSERT INTO usage_records (
         project_id,
@@ -134,12 +147,18 @@ export class UsageTracker {
 
   /**
    * Check if usage is within quota
+   * @param userId - User ID
+   * @param subscriptionTier - User's subscription tier
+   * @param resourceType - Type of resource being checked
+   * @param requestedAmount - Amount being requested
+   * @param projectId - Optional project ID for quota alerts
    */
   async checkQuota(
     userId: string,
     subscriptionTier: string,
     resourceType: ResourceType,
-    requestedAmount: bigint
+    requestedAmount: bigint,
+    projectId?: bigint
   ): Promise<{ allowed: boolean; reason?: string; currentUsage: bigint; limit: bigint }> {
     const limits = SUBSCRIPTION_LIMITS[subscriptionTier];
 
@@ -215,15 +234,19 @@ export class UsageTracker {
     // Check if approaching threshold (80%)
     const threshold = (limit * BigInt(80)) / BigInt(100);
     if (newTotal > threshold && currentUsage <= threshold) {
-      // Create quota alert
-      await this.createQuotaAlert(
-        BigInt(0), // Project ID not available here
-        userId,
-        resourceType,
-        80,
-        newTotal,
-        limit
-      );
+      // Create quota alert (only if projectId is provided)
+      if (projectId) {
+        await this.createQuotaAlert(
+          projectId,
+          userId,
+          resourceType,
+          80,
+          newTotal,
+          limit
+        );
+      } else {
+        console.warn(`[Billing] Quota threshold reached for ${userId}/${resourceType}, but no projectId for alert`);
+      }
     }
 
     return {

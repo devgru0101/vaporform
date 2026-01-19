@@ -1562,12 +1562,26 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
   });
 
   try {
+    // Import validation utilities
+    const { validateTerminalDimensions, validateProjectId } = await import('../shared/validation.js');
+
     // Extract parameters from URL
     const url = new URL(req.url || '', 'ws://localhost');
     const projectIdParam = url.searchParams.get('projectId');
     const token = url.searchParams.get('token');
-    const cols = parseInt(url.searchParams.get('cols') || '120');
-    const rows = parseInt(url.searchParams.get('rows') || '30');
+    let cols = parseInt(url.searchParams.get('cols') || '120');
+    let rows = parseInt(url.searchParams.get('rows') || '30');
+
+    // Validate terminal dimensions
+    try {
+      const dims = validateTerminalDimensions(cols, rows);
+      cols = dims.cols;
+      rows = dims.rows;
+    } catch (error) {
+      console.warn('[SSH Terminal] Invalid dimensions, using defaults');
+      cols = 120;
+      rows = 30;
+    }
 
     if (!projectIdParam || !token) {
       console.error('[SSH Terminal] Missing projectId or token');
@@ -1575,7 +1589,15 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
       return;
     }
 
-    const projectId = BigInt(projectIdParam);
+    // Validate projectId format
+    let projectId: bigint;
+    try {
+      projectId = validateProjectId(projectIdParam);
+    } catch (error) {
+      console.error('[SSH Terminal] Invalid projectId format');
+      ws.close(1008, 'Invalid projectId format');
+      return;
+    }
     console.log(`[SSH Terminal] Connecting to project ${projectId} (${cols}x${rows})`);
 
     // Verify authentication

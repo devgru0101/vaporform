@@ -8,6 +8,7 @@ import { verifyClerkJWT } from '../shared/clerk-auth.js';
 import { ensureProjectPermission } from '../projects/permissions.js';
 import { terminalManager } from './terminal-manager.js';
 import { ValidationError, toAPIError } from '../shared/errors.js';
+import { validateProjectId, validateWorkspaceId, validateSessionId } from '../shared/validation.js';
 
 interface CreateSessionRequest {
   authorization: Header<'Authorization'>;
@@ -47,11 +48,12 @@ export const createSession = api(
   { method: 'POST', path: '/terminal/sessions' },
   async (req: CreateSessionRequest): Promise<{ session: any }> => {
     const { userId } = await verifyClerkJWT(req.authorization);
-    const projectId = BigInt(req.projectId);
 
+    // Validate IDs with proper error handling
+    const projectId = validateProjectId(req.projectId);
     await ensureProjectPermission(userId, projectId, 'edit');
 
-    const workspaceId = req.workspaceId ? BigInt(req.workspaceId) : undefined;
+    const workspaceId = req.workspaceId ? validateWorkspaceId(req.workspaceId) : undefined;
 
     const session = await terminalManager.createSession(
       projectId,
@@ -74,7 +76,7 @@ export const getSession = api(
   { method: 'GET', path: '/terminal/sessions/:sessionId' },
   async (req: GetSessionRequest): Promise<{ session: any }> => {
     const { userId } = await verifyClerkJWT(req.authorization);
-    const sessionId = BigInt(req.sessionId);
+    const sessionId = validateSessionId(req.sessionId);
 
     const session = await terminalManager.getSession(sessionId);
 
@@ -95,7 +97,7 @@ export const listSessions = api(
   async (req: ListSessionsRequest): Promise<{ sessions: any[] }> => {
     const { userId } = await verifyClerkJWT(req.authorization);
 
-    const projectId = req.projectId ? BigInt(req.projectId) : undefined;
+    const projectId = req.projectId ? validateProjectId(req.projectId) : undefined;
 
     if (projectId) {
       await ensureProjectPermission(userId, projectId, 'view');
@@ -114,7 +116,7 @@ export const closeSession = api(
   { method: 'POST', path: '/terminal/sessions/:sessionId/close' },
   async (req: CloseSessionRequest): Promise<{ success: boolean }> => {
     const { userId } = await verifyClerkJWT(req.authorization);
-    const sessionId = BigInt(req.sessionId);
+    const sessionId = validateSessionId(req.sessionId);
 
     const session = await terminalManager.getSession(sessionId);
 

@@ -159,16 +159,34 @@ export class TerminalManager {
    * Start local PTY process (original implementation)
    */
   private async startLocalPTY(sessionId: bigint, ws: WebSocket, session: TerminalSession): Promise<void> {
-    // Determine shell based on platform
-    const shell = process.platform === 'win32' ? 'powershell.exe' : session.shell;
+    // Import validation utilities for shell whitelisting and safe env
+    const { validateShell, getSafeEnvForPty } = await import('../shared/validation.js');
 
-    // Spawn PTY process
+    // Determine shell based on platform with validation
+    let shell: string;
+    if (process.platform === 'win32') {
+      shell = 'powershell.exe';
+    } else {
+      // Validate shell is in allowlist to prevent shell injection
+      try {
+        shell = validateShell(session.shell);
+      } catch (error) {
+        console.warn(`[Terminal] Invalid shell "${session.shell}", falling back to /bin/sh`);
+        shell = '/bin/sh';
+      }
+    }
+
+    // SECURITY: Only pass safe environment variables to PTY
+    // This prevents leaking API keys, secrets, and other sensitive data
+    const safeEnv = getSafeEnvForPty();
+
+    // Spawn PTY process with safe environment
     const ptyProcess = pty.spawn(shell, [], {
       name: 'xterm-256color',
       cols: session.cols,
       rows: session.rows,
       cwd: session.cwd,
-      env: process.env as { [key: string]: string },
+      env: safeEnv,
     });
 
     // Update session with PID
