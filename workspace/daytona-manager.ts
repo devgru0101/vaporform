@@ -337,8 +337,9 @@ export class DaytonaManager implements DaytonaContext {
   }
 
   async createSshAccess(workspaceId: bigint, expiresInMinutes: number): Promise<{ token: string; expiresAt: Date }> {
-    // Generate a unique SSH token
-    const token = `ssh-${workspaceId}-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    // Generate a cryptographically secure SSH token
+    const { generateSecureToken } = await import('../shared/validation.js');
+    const token = `ssh-${workspaceId}-${generateSecureToken(24)}`;
     const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000);
 
     // Store token in database for validation

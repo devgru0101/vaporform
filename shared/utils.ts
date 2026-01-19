@@ -5,7 +5,7 @@
 import { SUBDOMAIN_REGEX } from './constants.js';
 
 /**
- * Generate a random subdomain-safe string
+ * Generate a random subdomain-safe string (cryptographically secure)
  */
 export function generateSubdomain(projectName: string): string {
   const sanitized = projectName
@@ -14,7 +14,9 @@ export function generateSubdomain(projectName: string): string {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
 
-  const random = Math.random().toString(36).substring(2, 8);
+  // Use crypto for secure randomness
+  const { randomBytes } = require('crypto');
+  const random = randomBytes(4).toString('hex');
   return `${sanitized}-${random}`;
 }
 
@@ -159,10 +161,12 @@ export function formatMinutes(minutes: number): string {
 }
 
 /**
- * Generate unique ID
+ * Generate unique ID (cryptographically secure)
  */
 export function generateId(): string {
-  return `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  // Use crypto for secure randomness
+  const { randomBytes } = require('crypto');
+  return `${Date.now()}_${randomBytes(6).toString('hex')}`;
 }
 
 /**

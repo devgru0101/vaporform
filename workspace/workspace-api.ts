@@ -644,13 +644,19 @@ async function deployProjectFilesInBackground(workspaceId: bigint, projectId: bi
 
             try {
               // Get or create a chat session for this project
-              const chatSessions = await aiDB.query<{ id: bigint, user_id: string }>`
-                SELECT id, user_id FROM chat_sessions 
-                WHERE project_id = ${projectId} 
+              const chatSessionsQuery = aiDB.query<{ id: bigint, user_id: string }>`
+                SELECT id, user_id FROM chat_sessions
+                WHERE project_id = ${projectId}
                   AND status = 'active'
                 ORDER BY last_activity_at DESC
                 LIMIT 1
               `;
+
+              // Collect results from AsyncGenerator
+              const chatSessions: { id: bigint, user_id: string }[] = [];
+              for await (const session of chatSessionsQuery) {
+                chatSessions.push(session);
+              }
 
               let sessionId: bigint;
               let userId: string;
@@ -1556,12 +1562,26 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
   });
 
   try {
+    // Import validation utilities
+    const { validateTerminalDimensions, validateProjectId } = await import('../shared/validation.js');
+
     // Extract parameters from URL
     const url = new URL(req.url || '', 'ws://localhost');
     const projectIdParam = url.searchParams.get('projectId');
     const token = url.searchParams.get('token');
-    const cols = parseInt(url.searchParams.get('cols') || '120');
-    const rows = parseInt(url.searchParams.get('rows') || '30');
+    let cols = parseInt(url.searchParams.get('cols') || '120');
+    let rows = parseInt(url.searchParams.get('rows') || '30');
+
+    // Validate terminal dimensions
+    try {
+      const dims = validateTerminalDimensions(cols, rows);
+      cols = dims.cols;
+      rows = dims.rows;
+    } catch (error) {
+      console.warn('[SSH Terminal] Invalid dimensions, using defaults');
+      cols = 120;
+      rows = 30;
+    }
 
     if (!projectIdParam || !token) {
       console.error('[SSH Terminal] Missing projectId or token');
@@ -1569,7 +1589,15 @@ sshWss.on('connection', async (ws: WebSocket, req) => {
       return;
     }
 
-    const projectId = BigInt(projectIdParam);
+    // Validate projectId format
+    let projectId: bigint;
+    try {
+      projectId = validateProjectId(projectIdParam);
+    } catch (error) {
+      console.error('[SSH Terminal] Invalid projectId format');
+      ws.close(1008, 'Invalid projectId format');
+      return;
+    }
     console.log(`[SSH Terminal] Connecting to project ${projectId} (${cols}x${rows})`);
 
     // Verify authentication

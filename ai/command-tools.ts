@@ -400,7 +400,7 @@ export async function handleSetPreviewPort(
         };
     }
     
-    await logToolExecution(jobId, 'daytona_set_preview_port', input);
+    await logToolExecution(jobId, 'daytona_set_preview_port', 'info', `Setting preview port to ${port}`, input);
     
     // Update workspace with preview port
     const workspaceDb = await import('../workspace/workspace-db.js');

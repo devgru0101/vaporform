@@ -147,13 +147,29 @@ export const readFile = api(
     // Check view permission
     await ensureProjectPermission(userId, projectId, 'view');
 
-    // Normalize path: remove leading slashes to avoid double slashes in URLs
-    const normalizedPath = req.path.replace(/^\/+/, '');
+    // Import validation utilities
+    const { validateFilePath } = await import('../shared/validation.js');
+    const { normalizePath } = await import('../shared/utils.js');
+    const { resolve } = await import('path');
+
+    // Validate and normalize path to prevent directory traversal
+    let normalizedPath: string;
+    try {
+      normalizedPath = validateFilePath(req.path);
+      normalizedPath = normalizePath(normalizedPath).replace(/^\/+/, '');
+    } catch (error) {
+      throw toAPIError(new ValidationError('Invalid file path'));
+    }
 
     try {
       // Read from local Git repository (matching listDirectory behavior)
       const gitRepoPath = join(tmpdir(), `vaporform-git-${projectId}`);
-      const fullPath = join(gitRepoPath, normalizedPath);
+      const fullPath = resolve(gitRepoPath, normalizedPath);
+
+      // Security check: Ensure resolved path is within the git repo directory
+      if (!fullPath.startsWith(gitRepoPath)) {
+        throw toAPIError(new ValidationError('Path traversal detected'));
+      }
 
       console.log(`[VFS] Reading file from Git repo: ${fullPath}`);
 
@@ -220,11 +236,31 @@ export const listDirectory = api(
 
     await ensureProjectPermission(userId, projectId, 'view');
 
+    // Import validation utilities
+    const { validateFilePath } = await import('../shared/validation.js');
+    const { normalizePath } = await import('../shared/utils.js');
+    const { resolve } = await import('path');
+
     try {
+      // Validate and normalize path to prevent directory traversal
+      let requestedPath = req.path || '/';
+      try {
+        if (requestedPath !== '/') {
+          requestedPath = validateFilePath(requestedPath);
+          requestedPath = normalizePath(requestedPath);
+        }
+      } catch (error) {
+        throw toAPIError(new ValidationError('Invalid directory path'));
+      }
+
       // Read from local Git repository
       const gitRepoPath = join(tmpdir(), `vaporform-git-${projectId}`);
-      const requestedPath = req.path || '/';
-      const fullPath = join(gitRepoPath, requestedPath);
+      const fullPath = resolve(gitRepoPath, requestedPath.replace(/^\/+/, ''));
+
+      // Security check: Ensure resolved path is within the git repo directory
+      if (!fullPath.startsWith(gitRepoPath)) {
+        throw toAPIError(new ValidationError('Path traversal detected'));
+      }
 
       console.log(`[VFS] Reading from Git repo: ${gitRepoPath}, path: ${requestedPath}`);
 

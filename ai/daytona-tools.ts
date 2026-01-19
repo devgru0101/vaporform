@@ -226,9 +226,41 @@ async function handleGitClone(
   workspaceId: bigint,
   input: { url: string; path: string; branch?: string }
 ): Promise<DaytonaToolResult> {
-  let command = `git clone ${input.url} ${input.path}`;
+  // Import validation utilities
+  const { escapeShellArg, validateGitUrl } = await import('../shared/validation.js');
+
+  // Validate git URL to prevent command injection
+  try {
+    validateGitUrl(input.url);
+  } catch (error) {
+    return {
+      success: false,
+      error: `Invalid Git URL: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+
+  // Validate path to prevent path traversal
+  if (input.path.includes('..') || input.path.includes('~') || input.path.startsWith('/')) {
+    return {
+      success: false,
+      error: 'Invalid path: must be relative and cannot contain .. or ~',
+    };
+  }
+
+  // Build command with proper escaping
+  let command = `git clone ${escapeShellArg(input.url)} ${escapeShellArg(input.path)}`;
   if (input.branch) {
-    command += ` -b ${input.branch}`;
+    // Validate branch name
+    const { validateGitRef } = await import('../shared/validation.js');
+    try {
+      validateGitRef(input.branch);
+      command += ` -b ${escapeShellArg(input.branch)}`;
+    } catch (error) {
+      return {
+        success: false,
+        error: `Invalid branch name: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
   }
 
   const result = await daytonaManager.executeCommand(workspaceId, command);

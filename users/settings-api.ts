@@ -133,7 +133,7 @@ export const getUserSettings = api(
       settings = result[0].settings;
     }
 
-    // Fetch API key from user_secrets
+    // Fetch API key presence from user_secrets (SECURITY: don't return actual values)
     const apiKeyResult: { secret_value: string }[] = [];
     for await (const row of db.query<{ secret_value: string }>`
       SELECT secret_value
@@ -143,11 +143,13 @@ export const getUserSettings = api(
       apiKeyResult.push(row);
     }
 
-    if (apiKeyResult.length > 0) {
-      settings.aiApiKey = apiKeyResult[0].secret_value;
+    if (apiKeyResult.length > 0 && apiKeyResult[0].secret_value) {
+      // Return masked indicator instead of actual key
+      settings.aiApiKey = '***configured***';
+      (settings as any).aiApiKeyConfigured = true;
     }
 
-    // Fetch OAuth token from user_secrets
+    // Fetch OAuth token presence from user_secrets (SECURITY: don't return actual values)
     const oauthTokenResult: { secret_value: string }[] = [];
     for await (const row of db.query<{ secret_value: string }>`
       SELECT secret_value
@@ -157,9 +159,11 @@ export const getUserSettings = api(
       oauthTokenResult.push(row);
     }
 
-    if (oauthTokenResult.length > 0) {
-      settings.aiOAuthToken = oauthTokenResult[0].secret_value;
+    if (oauthTokenResult.length > 0 && oauthTokenResult[0].secret_value) {
+      // Return masked indicator instead of actual token
+      settings.aiOAuthToken = '***configured***';
       settings.aiOAuthProvider = 'claude';
+      (settings as any).aiOAuthTokenConfigured = true;
     }
 
     return { settings };

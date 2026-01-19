@@ -4,9 +4,14 @@
  */
 
 import { api, Header } from 'encore.dev/api';
+import { secret } from 'encore.dev/config';
 import { verifyClerkJWT, getUserSubscriptionTier } from '../shared/clerk-auth.js';
 import type { User } from '../shared/types.js';
 import { db } from './db.js';
+import { timingSafeEqual } from 'crypto';
+
+// Admin secret for subscription management - configured via Encore secrets manager
+const adminSecret = secret("AdminSecret");
 
 interface GetUserResponse {
   user: User;
@@ -55,6 +60,7 @@ export const getCurrentUser = api(
 
 /**
  * Get user by Clerk ID
+ * Users can only access their own data (prevents user enumeration)
  */
 export const getUserByClerkId = api(
   { method: 'GET', path: '/users/:clerkUserId' },
@@ -66,7 +72,12 @@ export const getUserByClerkId = api(
     clerkUserId: string;
   }): Promise<GetUserResponse> => {
     // Verify the requester is authenticated
-    await verifyClerkJWT(authorization);
+    const { userId } = await verifyClerkJWT(authorization);
+
+    // Security: Users can only access their own data
+    if (userId !== clerkUserId) {
+      throw new Error('Forbidden: Cannot access other users\' data');
+    }
 
     const user = await db.queryRow<User>`
       SELECT * FROM users
@@ -115,15 +126,26 @@ export const updateCurrentUser = api(
 
 /**
  * Admin: Update user subscription tier
- * Protected by X-Admin-Secret header
+ * Protected by X-Admin-Secret header using Encore secrets
  */
 export const updateUserSubscription = api(
   { method: 'POST', path: '/admin/users/subscription' },
   async (req: UpdateSubscriptionRequest): Promise<{ success: boolean }> => {
-    // Verify admin secret (simple check for now, should be env var)
-    // In production, use Encore's secret manager
-    const validSecret = process.env.ADMIN_SECRET || 'dev_admin_secret';
-    if (req.adminSecret !== validSecret) {
+    // Verify admin secret using timing-safe comparison to prevent timing attacks
+    let validSecret: string;
+    try {
+      validSecret = adminSecret();
+    } catch (error) {
+      console.error('AdminSecret not configured - admin endpoints disabled');
+      throw new Error('Unauthorized: Admin functionality not configured');
+    }
+
+    // Timing-safe comparison to prevent timing attacks
+    const providedBuffer = Buffer.from(req.adminSecret || '');
+    const validBuffer = Buffer.from(validSecret);
+
+    if (providedBuffer.length !== validBuffer.length ||
+        !timingSafeEqual(providedBuffer, validBuffer)) {
       throw new Error('Unauthorized: Invalid admin secret');
     }
 

@@ -125,7 +125,9 @@ export class BuildManager {
       }
 
       // Create Daytona process session for this build
-      const sessionId = `build-${buildId}-${Date.now()}`;
+      // Use cryptographically secure random to avoid session ID collision
+      const { generateSecureToken } = await import('../shared/validation.js');
+      const sessionId = `build-${buildId}-${generateSecureToken(8)}`;
 
       if (daytonaManager['daytona'] && workspace.daytona_sandbox_id) {
         const sandbox = await daytonaManager['getSandbox'](workspace);
@@ -364,7 +366,7 @@ export class BuildManager {
           await new Promise(resolve => setTimeout(resolve, 2000)); // Poll every 2s
 
           try {
-            const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
+            const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId) as any;
 
             if (cmd.exitCode !== null && cmd.exitCode !== undefined) {
               completed = true;

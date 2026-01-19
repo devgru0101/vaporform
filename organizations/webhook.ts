@@ -105,16 +105,18 @@ export const clerkOrgWebhook = api.raw(
         case 'organizationMembership.created': {
           const { id, organization, public_user_data, role } = evt.data;
 
-          // Get org ID from database
+          // Get org ID from database (only consider active organizations)
           const org = await db.queryRow<{ id: bigint }>`
             SELECT id FROM organizations
             WHERE clerk_org_id = ${organization.id}
+            AND deleted_at IS NULL
           `;
 
-          // Get user ID from database
+          // Get user ID from database (only consider active users)
           const user = await db.queryRow<{ id: bigint }>`
             SELECT id FROM users
             WHERE clerk_user_id = ${public_user_data.user_id}
+            AND deleted_at IS NULL
           `;
 
           if (org && user) {

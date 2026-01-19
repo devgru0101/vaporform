@@ -280,13 +280,6 @@ export class DaytonaExecution {
         }
     }
 
-    /**
-     * Get sandbox URL (alias for getPreviewUrl)
-     */
-    async getSandboxUrl(workspaceId: bigint): Promise<{ url: string; token: string; port: number } | null> {
-        return this.getPreviewUrl(workspaceId);
-    }
-
     private parsePortFromOutput(output: string): number | null {
         const patterns = [
             /(?:port|PORT)\s*[:\s]+(\d+)/i,

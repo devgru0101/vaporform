@@ -4,6 +4,157 @@
  */
 
 import { ValidationError } from './errors.js';
+import { randomBytes } from 'crypto';
+
+// ============================================================================
+// Cryptographically Secure Random Generation
+// ============================================================================
+
+/**
+ * Generate a cryptographically secure random string
+ */
+export function generateSecureToken(length: number = 32): string {
+  return randomBytes(length).toString('hex');
+}
+
+/**
+ * Generate a secure session ID
+ */
+export function generateSecureSessionId(): string {
+  return `session-${generateSecureToken(16)}`;
+}
+
+// ============================================================================
+// Shell/Command Security
+// ============================================================================
+
+/**
+ * List of allowed shells for terminal operations
+ */
+export const ALLOWED_SHELLS = ['/bin/sh', '/bin/bash', '/usr/bin/zsh', '/bin/zsh'];
+
+/**
+ * Validate shell path is in allowlist
+ */
+export function validateShell(shell: string): string {
+  if (!ALLOWED_SHELLS.includes(shell)) {
+    throw new ValidationError(`Shell not allowed: ${shell}. Allowed: ${ALLOWED_SHELLS.join(', ')}`);
+  }
+  return shell;
+}
+
+/**
+ * Validate git reference (branch name, tag, etc.)
+ */
+export function validateGitRef(ref: string): string {
+  if (!ref || typeof ref !== 'string') {
+    throw new ValidationError('Invalid git reference');
+  }
+
+  ref = ref.trim();
+
+  // Git ref naming rules
+  if (ref.includes('..') || ref.includes('~') || ref.includes('^') ||
+      ref.includes(':') || ref.includes('?') || ref.includes('*') ||
+      ref.includes('[') || ref.includes('\\') || ref.includes('@{') ||
+      ref.startsWith('-') || ref.endsWith('.') || ref.endsWith('/') ||
+      ref.includes('//') || ref.includes('.lock')) {
+    throw new ValidationError('Invalid git reference format');
+  }
+
+  // Length check
+  if (ref.length > 255) {
+    throw new ValidationError('Git reference too long (max 255 characters)');
+  }
+
+  return ref;
+}
+
+/**
+ * Sanitize environment variables - remove dangerous ones
+ */
+export const BLOCKED_ENV_VARS = [
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'LD_DYNAMIC_WEAK',
+  'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE',
+  'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME',
+  '_JAVA_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JAVA_OPTS',
+  'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH',
+  'BASH_ENV', 'ENV', 'CDPATH'
+];
+
+export function filterEnvVars(env: Record<string, string>): Record<string, string> {
+  const filtered: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    const upperKey = key.toUpperCase();
+    if (!BLOCKED_ENV_VARS.some(blocked => upperKey === blocked || upperKey.startsWith(blocked + '='))) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
+/**
+ * Safe environment variables to pass to PTY processes
+ */
+export function getSafeEnvForPty(): Record<string, string> {
+  const safeVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'TZ', 'EDITOR'];
+  const result: Record<string, string> = {};
+
+  for (const varName of safeVars) {
+    if (process.env[varName]) {
+      result[varName] = process.env[varName]!;
+    }
+  }
+
+  // Always set a safe TERM
+  result['TERM'] = result['TERM'] || 'xterm-256color';
+
+  return result;
+}
+
+// ============================================================================
+// Terminal Dimension Validation
+// ============================================================================
+
+/**
+ * Validate terminal dimensions
+ */
+export function validateTerminalDimensions(cols: number, rows: number): { cols: number; rows: number } {
+  if (typeof cols !== 'number' || isNaN(cols) || cols < 1 || cols > 500) {
+    throw new ValidationError('Terminal cols must be between 1 and 500');
+  }
+  if (typeof rows !== 'number' || isNaN(rows) || rows < 1 || rows > 200) {
+    throw new ValidationError('Terminal rows must be between 1 and 200');
+  }
+  return { cols: Math.floor(cols), rows: Math.floor(rows) };
+}
+
+// ============================================================================
+// Prompt Injection Protection
+// ============================================================================
+
+/**
+ * Sanitize text that will be embedded in AI prompts
+ */
+export function sanitizeForPrompt(input: string, maxLength: number = 1000): string {
+  if (!input || typeof input !== 'string') {
+    return '';
+  }
+
+  return input
+    // Remove code fence patterns that could break formatting
+    .replace(/```/g, '`\u200B`\u200B`') // Zero-width space to break triple backticks
+    // Remove potential prompt injection patterns
+    .replace(/<\/?system>/gi, '[system]')
+    .replace(/<\/?assistant>/gi, '[assistant]')
+    .replace(/<\/?user>/gi, '[user]')
+    .replace(/<\/?human>/gi, '[human]')
+    // Remove IGNORE/DISREGARD instruction patterns
+    .replace(/\b(IGNORE|DISREGARD|FORGET)\s+(ALL\s+)?(PREVIOUS\s+)?(INSTRUCTIONS?|RULES?|PROMPTS?)\b/gi, '[FILTERED]')
+    .replace(/\b(NEW|ACTUAL|REAL)\s+(INSTRUCTIONS?|RULES?|PROMPTS?)\s*:/gi, '[FILTERED]:')
+    // Truncate
+    .substring(0, maxLength);
+}
 
 /**
  * Validate and sanitize file path
@@ -234,5 +385,22 @@ export function validateProjectId(id: string | bigint): bigint {
         return bigintId;
     } catch (error) {
         throw new ValidationError('Invalid project ID format');
+    }
+}
+
+/**
+ * Validate session ID (generic for terminal, build, etc.)
+ */
+export function validateSessionId(id: string | bigint): bigint {
+    try {
+        const bigintId = typeof id === 'string' ? BigInt(id) : id;
+
+        if (bigintId <= 0) {
+            throw new ValidationError('Session ID must be positive');
+        }
+
+        return bigintId;
+    } catch (error) {
+        throw new ValidationError('Invalid session ID format');
     }
 }

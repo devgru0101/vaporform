@@ -149,14 +149,15 @@ export async function verifyClerkJWT(authHeader: string | undefined): Promise<{
     const cleanInstance = instance.replace(/\$+$/, '');
     const issuer = `https://${cleanInstance}`;
 
-    console.log('[Clerk Auth] Verifying JWT with issuer:', issuer);
-    console.log('[Clerk Auth] Token preview:', token.substring(0, 50) + '...');
+    // SECURITY: Don't log tokens - they contain sensitive credentials
+    // Debug logging removed to prevent credential exposure in logs
 
     const { payload } = await jwtVerify(token, jwks, {
       issuer: issuer,
     });
 
-    console.log('[Clerk Auth] JWT verified successfully for user:', payload.sub);
+    // Only log user ID, not the full token or payload
+    console.log('[Clerk Auth] JWT verified for user');
 
     return {
       userId: payload.sub || '',
